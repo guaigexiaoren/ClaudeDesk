@@ -22,7 +22,6 @@ contextBridge.exposeInMainWorld('desk', {
   getHistory: (options) => ipcRenderer.invoke('session:history', options),
   deleteSession: (options) => ipcRenderer.invoke('session:delete', options),
   listMcp: () => ipcRenderer.invoke('mcp:list'),
-  menuAction: (action) => ipcRenderer.invoke('app:menu', { action }),
   startSession: (options) => ipcRenderer.invoke('session:start', options),
   resumeSession: (options) => ipcRenderer.invoke('session:resume', options),
   send: (text, options = {}) => ipcRenderer.invoke('session:send', { text, ...options }),

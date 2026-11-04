@@ -96,48 +96,6 @@ const COMMAND_ZH = {
   'team-onboarding': '团队上手引导',
 };
 
-const APP_MENU = [
-  {
-    label: '文件',
-    items: [
-      { label: '新建会话', accel: 'Ctrl+N', action: 'new-session' },
-      { label: '打开工作目录…', accel: 'Ctrl+O', action: 'pick-directory' },
-      { sep: true },
-      { label: '退出', accel: 'Alt+F4', action: 'quit' },
-    ],
-  },
-  {
-    label: '编辑',
-    items: [
-      { label: '撤销', accel: 'Ctrl+Z', action: 'undo' },
-      { label: '重做', accel: 'Ctrl+Y', action: 'redo' },
-      { sep: true },
-      { label: '剪切', accel: 'Ctrl+X', action: 'cut' },
-      { label: '复制', accel: 'Ctrl+C', action: 'copy' },
-      { label: '粘贴', accel: 'Ctrl+V', action: 'paste' },
-      { sep: true },
-      { label: '全选', accel: 'Ctrl+A', action: 'select-all' },
-    ],
-  },
-  {
-    label: '视图',
-    items: [
-      { label: '重新加载', accel: 'Ctrl+R', action: 'reload' },
-      { label: '开发者工具', accel: 'Ctrl+Shift+I', action: 'devtools' },
-      { sep: true },
-      { label: '实际大小', accel: 'Ctrl+0', action: 'zoom-reset' },
-      { label: '放大', accel: 'Ctrl+=', action: 'zoom-in' },
-      { label: '缩小', accel: 'Ctrl+-', action: 'zoom-out' },
-      { sep: true },
-      { label: '全屏', accel: 'F11', action: 'fullscreen' },
-    ],
-  },
-  {
-    label: '帮助',
-    items: [{ label: '关于 ClaudeDesk', action: 'about' }],
-  },
-];
-
 const state = {
   settings: {},
   sessions: [],
@@ -176,7 +134,6 @@ const els = {
   sessionMeta: $('session-meta'),
   sessionList: $('session-list'),
   addDirectory: $('add-directory'),
-  appMenu: $('app-menu'),
   trashToggle: $('trash-toggle'),
   trashArrow: $('trash-arrow'),
   trashList: $('trash-list'),
@@ -1289,86 +1246,6 @@ async function stopCurrent() {
   setRunning(false);
 }
 
-/* ---------------- 应用菜单 ---------------- */
-
-function buildAppMenu() {
-  els.appMenu.innerHTML = '';
-
-  for (const menu of APP_MENU) {
-    const wrap = document.createElement('div');
-    wrap.className = 'menu-wrap';
-
-    const button = document.createElement('button');
-    button.className = 'menu-button';
-    button.textContent = menu.label;
-
-    const dropdown = document.createElement('div');
-    dropdown.className = 'menu-dropdown';
-    dropdown.hidden = true;
-
-    for (const item of menu.items) {
-      if (item.sep) {
-        const sep = document.createElement('div');
-        sep.className = 'menu-sep';
-        dropdown.appendChild(sep);
-        continue;
-      }
-
-      const entry = document.createElement('button');
-      entry.className = 'menu-item';
-      const label = document.createElement('span');
-      label.textContent = item.label;
-      entry.appendChild(label);
-
-      if (item.accel) {
-        const accel = document.createElement('span');
-        accel.className = 'accel';
-        accel.textContent = item.accel;
-        entry.appendChild(accel);
-      }
-
-      entry.addEventListener('click', (event) => {
-        event.stopPropagation();
-        closeAppMenu();
-        runMenuAction(item.action);
-      });
-      dropdown.appendChild(entry);
-    }
-
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const willOpen = dropdown.hidden;
-      closeAppMenu();
-      if (willOpen) {
-        dropdown.hidden = false;
-        button.classList.add('open');
-      }
-    });
-
-    wrap.append(button, dropdown);
-    els.appMenu.appendChild(wrap);
-  }
-}
-
-function closeAppMenu() {
-  els.appMenu.querySelectorAll('.menu-dropdown').forEach((dropdown) => {
-    dropdown.hidden = true;
-  });
-  els.appMenu.querySelectorAll('.menu-button').forEach((button) => {
-    button.classList.remove('open');
-  });
-}
-
-function runMenuAction(action) {
-  if (action === 'new-session') {
-    newSession();
-  } else if (action === 'pick-directory') {
-    pickDirectoryAndOpen();
-  } else {
-    window.desk.menuAction(action);
-  }
-}
-
 async function pickDirectoryAndOpen() {
   const picked = await window.desk.pickDirectory();
   if (!picked?.ok || !picked.path) return;
@@ -1398,8 +1275,6 @@ async function init() {
     }
     refreshSessions();
   }
-
-  buildAppMenu();
 
   els.send.addEventListener('click', sendMessage);
   els.stop.addEventListener('click', stopCurrent);
@@ -1444,13 +1319,8 @@ async function init() {
     }
   });
 
-  document.addEventListener('click', (event) => {
-    if (!event.target.closest('.menu-wrap')) closeAppMenu();
-  });
-
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    closeAppMenu();
     if (!els.slashPalette.hidden) {
       hideSlashPalette();
     } else if (!els.questionModal.hidden) {
