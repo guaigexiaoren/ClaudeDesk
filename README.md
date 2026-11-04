@@ -57,9 +57,34 @@ DESIGN.md         设计文档
 ## 打包
 
 ```bash
-npm run dist       # 生成 release/ClaudeDesk.exe（便携版）
+npm run dist       # Windows：release/ClaudeDesk.exe（便携版）
+npm run dist:mac   # macOS：release/ClaudeDesk-1.0.0-arm64.dmg
 npm run pack       # 只生成目录，不压缩
 ```
+
+注意：Windows 安装包只能在 Windows 上打，macOS 安装包只能在 Mac 上打，同一份代码两边各打一次。
+
+### 在 Mac 上使用
+
+```bash
+git clone https://github.com/guaigexiaoren/ClaudeDesk.git
+cd ClaudeDesk
+npm install        # 会自动装上 darwin-arm64 的 Claude 引擎
+npm start          # 开发运行
+npm run dist:mac   # 生成 dmg
+```
+
+首次打开未签名的应用会被 Gatekeeper 拦截：右键应用选「打开」，或执行 `xattr -cr /Applications/ClaudeDesk.app`。
+
+## 两台电脑之间共享什么
+
+| 内容 | 能否共享 | 做法 |
+| --- | --- | --- |
+| 项目代码 | 可以 | Git 仓库，两边 clone / pull |
+| 全局指令、技能 | 可以 | 手动复制 `~/.claude/CLAUDE.md` 和 `~/.claude/skills/` |
+| 登录状态 | 不可以 | 两台机器各自登录一次 Claude |
+| 对话历史 | 不建议 | 记录按绝对路径存在 `~/.claude/projects/`，跨系统路径不同，同步后会话会指向不存在的目录 |
+| 应用设置 | 可以 | 复制各自的 settings.json（Windows 在 `%APPDATA%\ClaudeDesk`，Mac 在 `~/Library/Application Support/ClaudeDesk`） |
 
 ## 常见问题
 

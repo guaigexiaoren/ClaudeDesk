@@ -15,8 +15,8 @@
   --red: #f87171;
   --yellow: #facc15;
   --radius: 10px;
-  --font-ui: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
+  --font-ui: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'SF Mono', 'Cascadia Mono', Menlo, Consolas, 'Courier New', monospace;
   --base-font-size: 14px;
 }
 
