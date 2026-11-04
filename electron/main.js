@@ -42,6 +42,7 @@ function createWindow() {
     show: false,
     backgroundColor: '#16181d',
     title: 'ClaudeDesk',
+    icon: path.join(__dirname, '..', 'build', 'icon.png'),
     autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),

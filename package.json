@@ -24,6 +24,7 @@
     "files": [
       "electron/**/*",
       "renderer/**/*",
+      "build/**/*",
       "package.json",
       "node_modules/@anthropic-ai/**/*",
       "node_modules/@modelcontextprotocol/**/*",
@@ -39,7 +40,8 @@
     "win": {
       "target": [
         "portable"
-      ]
+      ],
+      "icon": "build/icon.png"
     },
     "portable": {
       "artifactName": "ClaudeDesk.exe"
@@ -50,6 +52,7 @@
         "zip"
       ],
       "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   },
