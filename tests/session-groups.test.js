@@ -1,0 +1,38 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert');
+
+const { buildSessionGroups } = require('../renderer/session-groups');
+
+const SESSIONS = [
+  { sessionId: 'a', cwd: 'C:\\work\\alpha', lastModified: 100 },
+  { sessionId: 'b', cwd: 'C:\\work\\alpha', lastModified: 300 },
+  { sessionId: 'c', cwd: 'C:\\work\\beta', lastModified: 200 },
+];
+
+test('按目录分组，并按最近修改时间排序', () => {
+  const groups = buildSessionGroups(SESSIONS, [], '');
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].name, 'alpha');
+  assert.deepEqual(
+    groups[0].sessions.map((session) => session.sessionId),
+    ['b', 'a']
+  );
+});
+
+test('回收站里的会话不出现在列表中', () => {
+  const groups = buildSessionGroups(SESSIONS, [{ sessionId: 'b' }], '');
+  const alpha = groups.find((group) => group.name === 'alpha');
+  assert.deepEqual(
+    alpha.sessions.map((session) => session.sessionId),
+    ['a']
+  );
+});
+
+test('当前目录没有会话时也会显示这个分组', () => {
+  const groups = buildSessionGroups(SESSIONS, [], 'C:\\work\\gamma');
+  const gamma = groups.find((group) => group.dir === 'C:\\work\\gamma');
+  assert.ok(gamma, '应该包含当前目录');
+  assert.equal(gamma.sessions.length, 0);
+});

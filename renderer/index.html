@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;"
+    />
+    <title>ClaudeDesk</title>
+    <link rel="stylesheet" href="bundle.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="brand">
+          <span class="brand-mark">✳</span>
+          <span class="brand-name">ClaudeDesk</span>
+        </div>
+
+        <button id="new-session" class="primary-button">＋ 新建会话</button>
+
+        <div class="sidebar-section grow">
+          <div class="section-title">
+            <span>会话</span>
+            <span class="section-actions">
+              <button id="add-directory" class="icon-button" title="添加工作目录">＋目录</button>
+              <button id="refresh-sessions" class="icon-button" title="刷新">⟳</button>
+            </span>
+          </div>
+          <div id="session-list" class="session-list">
+            <div class="empty-hint">还没有会话</div>
+          </div>
+        </div>
+
+        <div class="sidebar-section trash-section">
+          <button id="trash-toggle" class="trash-toggle">
+            <span id="trash-arrow" class="trash-arrow">▸</span>
+            <span class="trash-label">🗑 回收站</span>
+            <span id="trash-count" class="trash-count">0</span>
+          </button>
+          <div id="trash-list" class="session-list" hidden></div>
+        </div>
+
+        <div class="sidebar-footer">
+          <button id="open-settings" class="ghost-button">⚙ 设置</button>
+        </div>
+      </aside>
+
+      <main id="main">
+        <header id="topbar">
+          <div class="topbar-left">
+            <span id="status-dot" class="dot idle"></span>
+            <span id="session-title">新会话</span>
+            <span id="session-meta" class="meta"></span>
+          </div>
+          <div class="topbar-right">
+            <label class="control">
+              <span>权限</span>
+              <select id="mode-select">
+                <option value="default">每次询问</option>
+                <option value="acceptEdits">自动接受编辑</option>
+                <option value="plan">只读规划</option>
+                <option value="bypassPermissions">全部放行</option>
+              </select>
+            </label>
+          </div>
+        </header>
+
+        <div id="messages" class="messages">
+          <div class="welcome">
+            <div class="welcome-mark">✳</div>
+            <h1>ClaudeDesk</h1>
+            <p>选择工作目录，然后直接在下面提问。Claude 可以读写文件、运行命令、搜索代码。</p>
+            <div class="welcome-tips">
+              <span>Enter 发送</span>
+              <span>Shift + Enter 换行</span>
+              <span>Esc 停止生成</span>
+            </div>
+          </div>
+        </div>
+
+        <div id="composer" class="composer">
+          <div id="error-bar" class="error-bar" hidden></div>
+          <div id="slash-palette" class="slash-palette" hidden></div>
+          <div class="composer-row">
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="给 Claude 发消息…"
+              spellcheck="false"
+            ></textarea>
+            <button id="stop" class="stop-button" hidden>■</button>
+            <button id="send" class="send-button">发送</button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div id="permission-modal" class="modal" hidden>
+      <div class="modal-card permission-card">
+        <h3>Claude 请求执行操作</h3>
+        <p id="perm-title" class="perm-title"></p>
+        <div id="perm-detail" class="perm-detail"></div>
+        <pre id="perm-input" class="perm-input"></pre>
+        <div class="modal-actions">
+          <button id="perm-deny" class="ghost-button">拒绝</button>
+          <button id="perm-allow-session" class="ghost-button">本次会话总是允许</button>
+          <button id="perm-allow" class="primary-button">允许</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="question-modal" class="modal" hidden>
+      <div class="modal-card question-card">
+        <h3>Claude 想确认一下</h3>
+        <div id="question-list" class="question-list"></div>
+        <div class="modal-actions">
+          <button id="question-skip" class="ghost-button">跳过</button>
+          <button id="question-submit" class="primary-button">提交</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="plan-modal" class="modal" hidden>
+      <div class="modal-card plan-card">
+        <h3>计划待确认</h3>
+        <div id="plan-body" class="plan-body markdown"></div>
+        <div class="modal-actions">
+          <button id="plan-reject" class="ghost-button">拒绝，继续修改</button>
+          <button id="plan-approve" class="primary-button">批准并执行</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-modal" class="modal" hidden>
+      <div class="modal-card settings-card">
+        <h3>设置</h3>
+        <div class="setting-row">
+          <span>主题色</span>
+          <div id="accent-swatches" class="accent-swatches"></div>
+        </div>
+        <label class="setting-row">
+          <span>字号</span>
+          <input id="font-size" type="range" min="12" max="20" step="1" />
+          <span id="font-size-value" class="setting-value">14</span>
+        </label>
+        <div class="setting-row mcp-row">
+          <span>MCP</span>
+          <div class="mcp-panel">
+            <div id="mcp-list" class="mcp-list"></div>
+            <button id="mcp-refresh" class="ghost-button mcp-refresh">刷新状态</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span>工作目录</span>
+          <span id="settings-cwd" class="setting-value path"></span>
+        </div>
+        <div class="setting-row">
+          <span>版本</span>
+          <span id="settings-version" class="setting-value"></span>
+        </div>
+        <div class="modal-actions">
+          <button id="settings-close" class="primary-button">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="bundle.js"></script>
+  </body>
+</html>
