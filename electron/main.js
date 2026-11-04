@@ -13,12 +13,14 @@ const IS_SMOKE =
   process.argv.includes('--smoke-perm') ||
   process.argv.includes('--smoke-ui') ||
   process.argv.includes('--smoke-plan') ||
-  process.argv.includes('--smoke-question');
+  process.argv.includes('--smoke-question') ||
+  process.argv.includes('--smoke-steer');
 const IS_SMOKE_CHAT = process.argv.includes('--smoke-chat') || process.argv.includes('--smoke-perm');
 const IS_SMOKE_PERM = process.argv.includes('--smoke-perm');
 const IS_SMOKE_UI = process.argv.includes('--smoke-ui');
 const IS_SMOKE_PLAN = process.argv.includes('--smoke-plan');
 const IS_SMOKE_QUESTION = process.argv.includes('--smoke-question');
+const IS_SMOKE_STEER = process.argv.includes('--smoke-steer');
 
 let mainWindow = null;
 let store = null;
@@ -71,6 +73,10 @@ function createWindow() {
   mainWindow.webContents.once('did-finish-load', () => {
     if (!IS_SMOKE) return;
     console.log('SMOKE_OK');
+    if (IS_SMOKE_STEER) {
+      runSteerSmoke();
+      return;
+    }
     if (IS_SMOKE_QUESTION) {
       runQuestionSmoke();
       return;
@@ -123,7 +129,12 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const { protocol } = new URL(url);
+      if (protocol === 'http:' || protocol === 'https:') shell.openExternal(url);
+    } catch {
+      // 非法 URL 直接忽略
+    }
     return { action: 'deny' };
   });
 }
@@ -434,6 +445,80 @@ async function runQuestionSmoke() {
   app.quit();
 }
 
+async function runSteerSmoke() {
+  const wc = mainWindow.webContents;
+  const dir = path.join(app.getPath('temp'), 'claudedesk-steer-smoke');
+  fs.mkdirSync(dir, { recursive: true });
+
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+
+  const started = await wc.executeJavaScript(
+    `window.desk.startSession({ cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
+  );
+  console.log('SMOKE_STEER_START', JSON.stringify(started));
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+
+  await wc.executeJavaScript(
+    `window.desk.send('请运行命令：ping -n 10 127.0.0.1。等命令执行完，告诉我是否成功。')`
+  );
+
+  const startedAt = Date.now();
+  let steered = false;
+  let steerAt = 0;
+  let badges = 0;
+  let stats = '';
+
+  while (Date.now() - startedAt < 120_000) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    const permission = await wc.executeJavaScript(`(() => {
+      const modal = document.getElementById('permission-modal');
+      if (!modal || modal.hidden) return null;
+      const title = document.getElementById('perm-title').textContent;
+      document.getElementById('perm-allow').click();
+      return title;
+    })()`);
+    if (permission) {
+      console.log('SMOKE_STEER_PERMISSION', permission);
+      continue;
+    }
+
+    if (!steered && Date.now() - startedAt > 4000) {
+      badges = await wc.executeJavaScript(`(async () => {
+        const input = document.getElementById('input');
+        input.value = '另外，请在最终回复的最后一行写出当前工作目录的完整路径。';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        document.getElementById('send').click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return document.querySelectorAll('.bubble-badge').length;
+      })()`);
+      steered = true;
+      steerAt = Date.now() - startedAt;
+      continue;
+    }
+
+    stats = await wc.executeJavaScript(
+      `(() => { const nodes = document.querySelectorAll('.turn-stats'); const last = nodes[nodes.length - 1]; return last ? last.textContent : ''; })()`
+    );
+    if (stats) break;
+  }
+
+  const snapshot = await wc.executeJavaScript(`(() => {
+    const blocks = document.querySelectorAll('.msg.assistant .markdown');
+    const last = blocks[blocks.length - 1];
+    return JSON.stringify({
+      reply: last ? last.textContent.trim().slice(-400) : '',
+      userBubbles: document.querySelectorAll('.msg.user').length,
+      badgesLeft: document.querySelectorAll('.bubble-badge').length,
+      turnCount: document.querySelectorAll('.turn-stats').length
+    });
+  })()`);
+
+  console.log('SMOKE_STEER', JSON.stringify({ steered, steerAt, badges, stats }));
+  console.log('SMOKE_STEER_SNAPSHOT', snapshot);
+  app.quit();
+}
+
 function resolveClaudeExecutable() {
   if (!app.isPackaged) return null;
   const binary = process.platform === 'win32' ? 'claude.exe' : 'claude';
@@ -523,7 +608,7 @@ function registerIpc() {
     'session:list',
     safe(async ({ dir } = {}) => {
       const { listSessions } = await import('@anthropic-ai/claude-agent-sdk');
-      const list = await listSessions({ dir: dir || undefined, limit: 100 });
+      const list = await listSessions({ dir: dir || undefined, limit: 300 });
       const mapped = list.map((s) => ({
         sessionId: s.sessionId,
         title: s.customTitle || s.summary || s.firstPrompt || '未命名会话',
@@ -577,7 +662,18 @@ function registerIpc() {
         toEntry(name, server, 'user')
       );
 
-      const project = (config.projects || {})[store.get().cwd || ''];
+      const normalize = (target) => {
+        const resolved = path.resolve(target || '');
+        return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+      };
+      const cwdKey = normalize(store.get().cwd || '');
+      let project = null;
+      for (const [key, value] of Object.entries(config.projects || {})) {
+        if (normalize(key) === cwdKey) {
+          project = value;
+          break;
+        }
+      }
       for (const [name, server] of Object.entries(project?.mcpServers || {})) {
         servers.push(toEntry(name, server, 'project'));
       }
@@ -609,7 +705,10 @@ function registerIpc() {
     })
   );
 
-  ipcMain.handle('session:send', safe(async ({ text }) => session.send(text)));
+  ipcMain.handle(
+    'session:send',
+    safe(async ({ text, steer }) => session.send(text, { priority: steer ? 'next' : undefined }))
+  );
 
   ipcMain.handle('session:interrupt', safe(async () => session.interrupt()));
 

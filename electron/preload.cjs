@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld('desk', {
   listMcp: () => ipcRenderer.invoke('mcp:list'),
   startSession: (options) => ipcRenderer.invoke('session:start', options),
   resumeSession: (options) => ipcRenderer.invoke('session:resume', options),
-  send: (text) => ipcRenderer.invoke('session:send', { text }),
+  send: (text, options = {}) => ipcRenderer.invoke('session:send', { text, ...options }),
   interrupt: () => ipcRenderer.invoke('session:interrupt'),
   setModel: (model) => ipcRenderer.invoke('session:set-model', { model }),
   setPermissionMode: (mode) => ipcRenderer.invoke('session:set-permission-mode', { mode }),

@@ -398,6 +398,17 @@ select:hover {
   word-break: break-word;
 }
 
+.bubble-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  vertical-align: middle;
+}
+
 .msg.assistant .markdown {
   font-size: var(--base-font-size);
 }

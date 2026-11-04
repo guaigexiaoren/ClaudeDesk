@@ -106,18 +106,29 @@ class SessionManager extends EventEmitter {
         options.allowDangerouslySkipPermissions = true;
       }
 
-      this.query = query({ prompt: this.queue, options });
+      try {
+        this.query = query({ prompt: this.queue, options });
+      } catch (err) {
+        this.queue?.close();
+        this.queue = null;
+        this.controller?.abort();
+        this.controller = null;
+        this.status = 'idle';
+        throw err;
+      }
+      const activeQuery = this.query;
       try {
         this.query
           .initializationResult()
           .then((info) => {
+            if (this.query !== activeQuery) return;
             if (info?.commands?.length) this.emit('commands', info.commands);
           })
           .catch(() => {});
       } catch {
         // 老版本 CLI 可能不支持，忽略即可
       }
-      this._pump();
+      this._pump(activeQuery);
       this._emitState();
       return { ok: true, sessionId: this.sessionId };
     } finally {
@@ -125,14 +136,16 @@ class SessionManager extends EventEmitter {
     }
   }
 
-  async _pump() {
+  async _pump(activeQuery) {
+    const isCurrent = () => this.query === activeQuery;
     try {
-      for await (const message of this.query) {
+      for await (const message of activeQuery) {
+        if (!isCurrent()) return;
         if (message.type === 'system' && message.subtype === 'init') {
           this.sessionId = message.session_id;
           this.model = message.model || this.model;
           this.cwd = message.cwd || this.cwd;
-          this.status = 'idle';
+          if (this.status !== 'running') this.status = 'idle';
           this._emitState({ tools: message.tools, claudeCodeVersion: message.claude_code_version });
         }
         if (message.type === 'assistant') {
@@ -144,9 +157,11 @@ class SessionManager extends EventEmitter {
         }
         this.emit('message', message);
       }
+      if (!isCurrent()) return;
       this.status = 'idle';
       this._emitState({ ended: true });
     } catch (err) {
+      if (!isCurrent()) return;
       if (this.controller?.signal.aborted) {
         this.status = 'idle';
         this._emitState();
@@ -158,17 +173,23 @@ class SessionManager extends EventEmitter {
     }
   }
 
-  send(text) {
+  send(text, options = {}) {
     if (!this.queue || !this.query) throw new Error('会话尚未启动');
     if (!text || !text.trim()) return { ok: false };
-    this.status = 'running';
-    this._emitState();
-    this.queue.push({
+
+    const message = {
       type: 'user',
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
-    });
-    return { ok: true };
+      uuid: randomUUID(),
+      origin: { kind: 'human' },
+    };
+    if (options.priority) message.priority = options.priority;
+
+    this.status = 'running';
+    this._emitState();
+    this.queue.push(message);
+    return { ok: true, uuid: message.uuid };
   }
 
   _askPermission(toolName, input, opts = {}) {

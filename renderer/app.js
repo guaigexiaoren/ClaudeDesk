@@ -105,6 +105,7 @@ const state = {
   sessionId: null,
   sessionActive: false,
   running: false,
+  sending: false,
   streamEl: null,
   toolCards: new Map(),
   permissionQueue: [],
@@ -231,14 +232,24 @@ function appendEl(el) {
 
 /* ---------------- 消息渲染 ---------------- */
 
-function appendUserMessage(text) {
+function appendUserMessage(text, steer = false) {
   const wrap = document.createElement('div');
   wrap.className = 'msg user';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = text;
+  if (steer) {
+    const badge = document.createElement('span');
+    badge.className = 'bubble-badge';
+    badge.textContent = '插入';
+    bubble.appendChild(badge);
+  }
   wrap.appendChild(bubble);
   appendEl(wrap);
+}
+
+function clearInsertBadges() {
+  document.querySelectorAll('.bubble-badge').forEach((badge) => badge.remove());
 }
 
 function appendMarkdown(text) {
@@ -449,6 +460,7 @@ function handleUser(message) {
 }
 
 function handleResult(message) {
+  clearInsertBadges();
   const interrupted = /interrupt|aborted/i.test(
     [message.result, ...(Array.isArray(message.errors) ? message.errors : [])].filter(Boolean).join(' ')
   );
@@ -518,7 +530,11 @@ function setRunning(running) {
   state.running = running;
   els.statusDot.className = `dot ${running ? 'running' : state.errorShown ? 'error' : 'idle'}`;
   els.stop.hidden = !running;
-  els.send.disabled = running;
+  els.send.disabled = false;
+  els.send.textContent = running ? '插入' : '发送';
+  els.input.placeholder = running
+    ? 'Claude 正在工作，输入内容会插入当前任务…'
+    : '给 Claude 发消息…';
 }
 
 function showError(text) {
@@ -744,7 +760,11 @@ function restoreFromTrash(sessionId) {
 
 async function deleteForever(item) {
   if (!window.confirm(`彻底删除「${item.title || '未命名会话'}」？此操作不可恢复。`)) return;
-  await window.desk.deleteSession({ sessionId: item.sessionId, dir: item.cwd });
+  const result = await window.desk.deleteSession({ sessionId: item.sessionId, dir: item.cwd });
+  if (!result?.ok) {
+    showError(result?.error || '删除失败');
+    return;
+  }
   restoreFromTrash(item.sessionId);
 }
 
@@ -1183,23 +1203,30 @@ async function ensureSession() {
 }
 
 async function sendMessage() {
+  if (state.sending) return;
   const text = els.input.value.trim();
   if (!text) return;
-  clearError();
 
-  const ready = await ensureSession();
-  if (!ready) return;
+  state.sending = true;
+  try {
+    clearError();
+    const steer = state.running;
+    const ready = await ensureSession();
+    if (!ready) return;
 
-  appendUserMessage(text);
-  els.input.value = '';
-  autosize();
-  hideSlashPalette();
-  setRunning(true);
+    appendUserMessage(text, steer);
+    els.input.value = '';
+    autosize();
+    hideSlashPalette();
+    setRunning(true);
 
-  const result = await window.desk.send(text);
-  if (!result?.ok) {
-    setRunning(false);
-    showError(result?.error || '发送失败');
+    const result = await window.desk.send(text, { steer });
+    if (!result?.ok) {
+      setRunning(false);
+      showError(result?.error || '发送失败');
+    }
+  } finally {
+    state.sending = false;
   }
 }
 
@@ -1275,7 +1302,7 @@ async function init() {
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
-      if (!state.running) sendMessage();
+      sendMessage();
     }
   });
 
@@ -1350,6 +1377,7 @@ async function init() {
   window.desk.onPlan(showPlan);
   window.desk.onCommands(handleCommands);
   window.desk.onError((payload) => {
+    clearInsertBadges();
     setRunning(false);
     showError(payload?.message || '会话出错');
   });
