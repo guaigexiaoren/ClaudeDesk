@@ -53,6 +53,7 @@ function createWindow() {
     },
   });
 
+  mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
   mainWindow.once('ready-to-show', () => {
@@ -108,6 +109,7 @@ function createWindow() {
             title: (document.getElementById('session-title') || {}).textContent || null,
             sessionItems: document.querySelectorAll('.session-item').length,
             groups: document.querySelectorAll('.session-group').length,
+            menuButtons: document.querySelectorAll('.menu-button').length,
             trashCount: (document.getElementById('trash-count') || {}).textContent || null,
             accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
             pageBg: getComputedStyle(document.body).backgroundColor,
@@ -118,6 +120,10 @@ function createWindow() {
           })`
         );
         console.log('SMOKE_STATE', result);
+        const image = await mainWindow.webContents.capturePage();
+        const shot = path.join(app.getPath('temp'), 'claudedesk-smoke.png');
+        fs.writeFileSync(shot, image.toPNG());
+        console.log('SMOKE_SHOT', shot);
       } catch (err) {
         console.error('SMOKE_STATE_ERROR', err.message);
       }
@@ -393,10 +399,22 @@ async function runUiSmoke() {
     return JSON.stringify({ items, first: first.trim() });
   })()`);
 
+  const menu = await wc.executeJavaScript(`(() => {
+    const button = document.querySelector('.menu-button');
+    if (!button) return JSON.stringify({ skipped: true });
+    button.click();
+    const dropdown = document.querySelector('.menu-dropdown');
+    const opened = dropdown ? !dropdown.hidden : false;
+    const items = dropdown ? dropdown.querySelectorAll('.menu-item').length : 0;
+    document.body.click();
+    return JSON.stringify({ opened, items });
+  })()`);
+
   console.log('SMOKE_UI_SLASH', slash);
   console.log('SMOKE_UI_QUESTION', question);
   console.log('SMOKE_UI_PLAN', plan);
   console.log('SMOKE_UI_PLAN_FEEDBACK', planFeedback);
+  console.log('SMOKE_UI_MENU', menu);
   console.log('SMOKE_UI_ACCENT', accent);
   console.log('SMOKE_UI_TRASH', trash);
   console.log('SMOKE_UI_MCP', mcp);
@@ -700,6 +718,66 @@ function registerIpc() {
     safe(async ({ sessionId, dir }) => {
       const { deleteSession } = await import('@anthropic-ai/claude-agent-sdk');
       await deleteSession(sessionId, { dir: dir || undefined });
+      return { ok: true };
+    })
+  );
+
+  ipcMain.handle(
+    'app:menu',
+    safe(async ({ action }) => {
+      const wc = mainWindow?.webContents;
+      switch (action) {
+        case 'quit':
+          app.quit();
+          break;
+        case 'undo':
+          wc?.undo();
+          break;
+        case 'redo':
+          wc?.redo();
+          break;
+        case 'cut':
+          wc?.cut();
+          break;
+        case 'copy':
+          wc?.copy();
+          break;
+        case 'paste':
+          wc?.paste();
+          break;
+        case 'select-all':
+          wc?.selectAll();
+          break;
+        case 'reload':
+          wc?.reload();
+          break;
+        case 'devtools':
+          wc?.toggleDevTools();
+          break;
+        case 'zoom-reset':
+          wc?.setZoomLevel(0);
+          break;
+        case 'zoom-in':
+          if (wc) wc.setZoomLevel(Math.min(wc.getZoomLevel() + 0.5, 5));
+          break;
+        case 'zoom-out':
+          if (wc) wc.setZoomLevel(Math.max(wc.getZoomLevel() - 0.5, -5));
+          break;
+        case 'fullscreen':
+          if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen());
+          break;
+        case 'about':
+          dialog.showMessageBox(mainWindow, {
+            type: 'info',
+            title: '关于 ClaudeDesk',
+            message: 'ClaudeDesk',
+            detail: `版本 ${app.getVersion()}\n基于 Claude Agent SDK 的桌面工作台。`,
+            buttons: ['好的'],
+          });
+          break;
+        default:
+          break;
+      }
       return { ok: true };
     })
   );
