@@ -31,7 +31,8 @@ contextBridge.exposeInMainWorld('desk', {
   closeSession: () => ipcRenderer.invoke('session:close'),
   respondPermission: (id, decision) => ipcRenderer.invoke('permission:respond', { id, decision }),
   respondQuestion: (id, payload) => ipcRenderer.invoke('question:respond', { id, ...payload }),
-  respondPlan: (id, decision, editedPlan) => ipcRenderer.invoke('plan:respond', { id, decision, editedPlan }),
+  respondPlan: (id, decision, editedPlan, feedback) =>
+    ipcRenderer.invoke('plan:respond', { id, decision, editedPlan, feedback }),
 
   // 事件
   onEvent: subscribe('session:event'),

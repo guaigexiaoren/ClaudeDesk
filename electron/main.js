@@ -14,12 +14,14 @@ const IS_SMOKE =
   process.argv.includes('--smoke-ui') ||
   process.argv.includes('--smoke-plan') ||
   process.argv.includes('--smoke-question') ||
+  process.argv.includes('--smoke-bypass') ||
   process.argv.includes('--smoke-steer');
 const IS_SMOKE_CHAT = process.argv.includes('--smoke-chat') || process.argv.includes('--smoke-perm');
 const IS_SMOKE_PERM = process.argv.includes('--smoke-perm');
 const IS_SMOKE_UI = process.argv.includes('--smoke-ui');
 const IS_SMOKE_PLAN = process.argv.includes('--smoke-plan');
 const IS_SMOKE_QUESTION = process.argv.includes('--smoke-question');
+const IS_SMOKE_BYPASS = process.argv.includes('--smoke-bypass');
 const IS_SMOKE_STEER = process.argv.includes('--smoke-steer');
 
 let mainWindow = null;
@@ -75,6 +77,10 @@ function createWindow() {
     console.log('SMOKE_OK');
     if (IS_SMOKE_STEER) {
       runSteerSmoke();
+      return;
+    }
+    if (IS_SMOKE_BYPASS) {
+      runBypassSmoke();
       return;
     }
     if (IS_SMOKE_QUESTION) {
@@ -337,6 +343,14 @@ async function runUiSmoke() {
     const body = document.getElementById('plan-body');
     return JSON.stringify({ visible: !modal.hidden, rendered: body.querySelector('h1') !== null });
   })()`);
+
+  const planFeedback = await wc.executeJavaScript(`(() => {
+    document.getElementById('plan-reject').click();
+    return JSON.stringify({
+      visible: !document.getElementById('plan-feedback-wrap').hidden,
+      label: document.getElementById('plan-reject').textContent,
+    });
+  })()`);
   await wc.executeJavaScript(`document.getElementById('plan-approve').click()`);
 
   const accent = await wc.executeJavaScript(`(async () => {
@@ -381,6 +395,7 @@ async function runUiSmoke() {
   console.log('SMOKE_UI_SLASH', slash);
   console.log('SMOKE_UI_QUESTION', question);
   console.log('SMOKE_UI_PLAN', plan);
+  console.log('SMOKE_UI_PLAN_FEEDBACK', planFeedback);
   console.log('SMOKE_UI_ACCENT', accent);
   console.log('SMOKE_UI_TRASH', trash);
   console.log('SMOKE_UI_MCP', mcp);
@@ -516,6 +531,55 @@ async function runSteerSmoke() {
 
   console.log('SMOKE_STEER', JSON.stringify({ steered, steerAt, badges, stats }));
   console.log('SMOKE_STEER_SNAPSHOT', snapshot);
+  app.quit();
+}
+
+async function runBypassSmoke() {
+  const wc = mainWindow.webContents;
+  const dir = path.join(app.getPath('temp'), 'claudedesk-bypass-smoke');
+  fs.mkdirSync(dir, { recursive: true });
+
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  await wc.executeJavaScript(
+    `window.desk.startSession({ cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
+  );
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+
+  const applied = await wc.executeJavaScript(`window.desk.setPermissionMode('bypassPermissions')`);
+  console.log('SMOKE_BYPASS_SET', JSON.stringify(applied));
+
+  await wc.executeJavaScript(
+    `window.desk.send('在当前目录创建 bypass-smoke.txt，内容写 ok。不要做别的事。')`
+  );
+
+  const deadline = Date.now() + 90_000;
+  let permissionShown = '';
+  let stats = '';
+
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    permissionShown = await wc.executeJavaScript(`(() => {
+      const modal = document.getElementById('permission-modal');
+      if (!modal || modal.hidden) return '';
+      return document.getElementById('perm-title').textContent;
+    })()`);
+    if (permissionShown) break;
+
+    stats = await wc.executeJavaScript(
+      `(() => { const nodes = document.querySelectorAll('.turn-stats'); const last = nodes[nodes.length - 1]; return last ? last.textContent : ''; })()`
+    );
+    if (stats) break;
+  }
+
+  const fileCreated = fs.existsSync(path.join(dir, 'bypass-smoke.txt'));
+  console.log('SMOKE_BYPASS', JSON.stringify({ permissionShown, stats, fileCreated }));
+
+  try {
+    fs.unlinkSync(path.join(dir, 'bypass-smoke.txt'));
+  } catch {
+    /* 忽略 */
+  }
   app.quit();
 }
 
@@ -742,7 +806,9 @@ function registerIpc() {
 
   ipcMain.handle(
     'plan:respond',
-    safe(async ({ id, decision, editedPlan }) => session.respondPlan(id, decision, editedPlan))
+    safe(async ({ id, decision, editedPlan, feedback }) =>
+      session.respondPlan(id, decision, editedPlan, feedback)
+    )
   );
 }
 

@@ -1204,6 +1204,29 @@ select:hover {
   margin-bottom: 16px;
 }
 
+.plan-feedback {
+  margin-bottom: 12px;
+}
+
+.plan-feedback textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.plan-feedback textarea:focus {
+  border-color: var(--accent-border);
+}
+
 /* 滚动条 */
 
 ::-webkit-scrollbar {

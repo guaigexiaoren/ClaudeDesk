@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/common';
 import 'highlight.js/styles/github-dark.css';
 import { buildSessionGroups } from './session-groups.js';
+import { formatDuration } from './format.js';
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -153,6 +154,8 @@ const els = {
   planBody: $('plan-body'),
   planApprove: $('plan-approve'),
   planReject: $('plan-reject'),
+  planFeedbackWrap: $('plan-feedback-wrap'),
+  planFeedback: $('plan-feedback'),
   slashPalette: $('slash-palette'),
   settingsModal: $('settings-modal'),
   accentSwatches: $('accent-swatches'),
@@ -354,7 +357,7 @@ function attachToolResult(toolUseId, text, isError) {
 
 function appendStats(message) {
   const parts = [];
-  if (message.duration_ms) parts.push(`耗时 ${(message.duration_ms / 1000).toFixed(1)}s`);
+  if (message.duration_ms) parts.push(`耗时 ${formatDuration(message.duration_ms)}`);
   if (typeof message.total_cost_usd === 'number') parts.push(`$${message.total_cost_usd.toFixed(4)}`);
   const usage = message.usage;
   if (usage && (usage.input_tokens || usage.output_tokens)) {
@@ -1078,6 +1081,9 @@ function showPlan(request) {
   state.currentPlan = request;
   els.planBody.innerHTML = renderMarkdown(request.plan || '（计划内容为空）');
   highlightCode(els.planBody);
+  els.planFeedbackWrap.hidden = true;
+  els.planFeedback.value = '';
+  els.planReject.textContent = '拒绝，继续修改';
   els.planModal.hidden = false;
   els.planApprove.focus();
 }
@@ -1085,8 +1091,13 @@ function showPlan(request) {
 async function respondPlan(decision) {
   const request = state.currentPlan;
   if (!request) return;
+
+  const feedback = els.planFeedback.value.trim();
   state.currentPlan = null;
   els.planModal.hidden = true;
+  els.planFeedbackWrap.hidden = true;
+  els.planFeedback.value = '';
+  els.planReject.textContent = '拒绝，继续修改';
 
   if (decision === 'approve') {
     state.permissionMode = 'default';
@@ -1094,7 +1105,7 @@ async function respondPlan(decision) {
     window.desk.saveSettings({ permissionMode: 'default' });
   }
 
-  await window.desk.respondPlan(request.id, decision);
+  await window.desk.respondPlan(request.id, decision, undefined, decision === 'reject' ? feedback : undefined);
   if (decision === 'approve' && state.sessionActive) window.desk.setPermissionMode('default');
 }
 
@@ -1326,7 +1337,21 @@ async function init() {
   els.questionSubmit.addEventListener('click', submitQuestion);
   els.questionSkip.addEventListener('click', skipQuestion);
   els.planApprove.addEventListener('click', () => respondPlan('approve'));
-  els.planReject.addEventListener('click', () => respondPlan('reject'));
+  els.planReject.addEventListener('click', () => {
+    if (els.planFeedbackWrap.hidden) {
+      els.planFeedbackWrap.hidden = false;
+      els.planReject.textContent = '拒绝并发送';
+      els.planFeedback.focus();
+      return;
+    }
+    respondPlan('reject');
+  });
+  els.planFeedback.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      respondPlan('reject');
+    }
+  });
 
   els.modeSelect.addEventListener('change', async () => {
     const mode = els.modeSelect.value;

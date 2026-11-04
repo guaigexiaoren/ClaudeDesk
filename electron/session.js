@@ -102,9 +102,8 @@ class SessionManager extends EventEmitter {
       if (this.model) options.model = this.model;
       if (resume) options.resume = resume;
       if (this.claudeExecutable) options.pathToClaudeCodeExecutable = this.claudeExecutable;
-      if (permissionMode === 'bypassPermissions') {
-        options.allowDangerouslySkipPermissions = true;
-      }
+      // 始终允许切换到「全部放行」：不传这个标志时，会话中途 setPermissionMode('bypassPermissions') 会被 CLI 忽略
+      options.allowDangerouslySkipPermissions = true;
 
       try {
         this.query = query({ prompt: this.queue, options });
@@ -243,13 +242,19 @@ class SessionManager extends EventEmitter {
     return { ok: true };
   }
 
-  respondPlan(id, decision, editedPlan) {
+  respondPlan(id, decision, editedPlan, feedback) {
     const entry = this.pendingPermissions.get(id);
     if (!entry) return { ok: false };
     this.pendingPermissions.delete(id);
 
     if (decision !== 'approve') {
-      entry.resolve({ behavior: 'deny', message: '用户没有批准这个计划，请继续完善计划后再提交。' });
+      const note = typeof feedback === 'string' ? feedback.trim() : '';
+      entry.resolve({
+        behavior: 'deny',
+        message: note
+          ? `用户拒绝了计划，并提出了修改意见：${note}`
+          : '用户没有批准这个计划，请继续完善计划后再提交。',
+      });
       return { ok: true };
     }
 
