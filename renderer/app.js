@@ -2059,6 +2059,7 @@ function pumpPermission() {
   setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
   if (key === state.activeKey) setActivity('等待你确认权限…');
+  else rememberActivity(key, '等待你确认权限…');
 }
 
 async function answerPermission(decision) {
@@ -2068,6 +2069,7 @@ async function answerPermission(decision) {
   els.permModal.hidden = true;
   await window.desk.respondPermission({ key: entry.key, id: entry.request.id, decision });
   setSessionStatus(entry.key, 'working');
+  rememberActivity(entry.key, '等待模型响应…');
   if (entry.key === state.activeKey) {
     state.awaitingUser = false;
     setActivity('等待模型响应…');
@@ -2181,6 +2183,7 @@ function pumpQuestions() {
   setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
   if (key === state.activeKey) setActivity('等待你回答问题…');
+  else rememberActivity(key, '等待你回答问题…');
 }
 
 function collectAnswers() {
@@ -2227,6 +2230,7 @@ async function submitQuestion() {
     });
   }
   setSessionStatus(key, 'working');
+  rememberActivity(key, '等待模型响应…');
   if (key === state.activeKey) {
     state.awaitingUser = false;
     setActivity('等待模型响应…');
@@ -2246,6 +2250,7 @@ async function skipQuestion() {
     response: '用户跳过了这些问题，请自行判断后继续。',
   });
   setSessionStatus(key, 'working');
+  rememberActivity(key, '等待模型响应…');
   if (key === state.activeKey) {
     state.awaitingUser = false;
     setActivity('等待模型响应…');
@@ -2278,6 +2283,7 @@ function pumpPlans() {
   setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
   if (key === state.activeKey) setActivity('等待你审批计划…');
+  else rememberActivity(key, '等待你审批计划…');
 }
 
 async function respondPlan(decision) {
@@ -2308,6 +2314,7 @@ async function respondPlan(decision) {
     window.desk.setPermissionMode({ key, mode: 'default' });
   }
   setSessionStatus(key, 'working');
+  rememberActivity(key, '等待模型响应…');
   if (key === state.activeKey) {
     state.awaitingUser = false;
     setActivity('等待模型响应…');
