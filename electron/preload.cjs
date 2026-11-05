@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('desk', {
   onPlan: subscribe('session:plan'),
   onCommands: subscribe('session:commands'),
   onError: subscribe('session:error'),
+  onStderr: subscribe('session:stderr'),
   onNewSession: subscribe('menu:new-session'),
   onPickDirectory: subscribe('menu:pick-directory'),
   onMenuExport: subscribe('menu:export'),

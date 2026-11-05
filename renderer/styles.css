@@ -1047,6 +1047,64 @@ select:hover {
   margin-bottom: 8px;
 }
 
+/* 当前活动状态条 */
+
+.activity-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.activity-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+.activity-bar.done .activity-dot {
+  background: var(--green);
+  animation: none;
+}
+
+.activity-bar.stopped .activity-dot {
+  background: var(--faint);
+  animation: none;
+}
+
+.activity-bar.error .activity-dot {
+  background: var(--red);
+  animation: none;
+}
+
+.activity-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-time {
+  margin-left: auto;
+  flex: none;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-dot {
+    animation: none;
+  }
+}
+
 /* ---------- 弹窗 ---------- */
 
 .modal {

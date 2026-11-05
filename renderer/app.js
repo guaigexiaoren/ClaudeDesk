@@ -112,6 +112,15 @@ const state = {
   sending: false,
   streamEl: null,
   thinkingLive: [],
+  activityStartedAt: 0,
+  activityTimer: null,
+  activityHideTimer: null,
+  activityLabel: '',
+  lastEventAt: 0,
+  awaitingUser: false,
+  switching: false,
+  replaying: false,
+  lastStderr: '',
   toolCards: new Map(),
   permissionQueue: [],
   currentPermission: null,
@@ -142,6 +151,9 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   messages: $('messages'),
+  activityBar: $('activity-bar'),
+  activityLabel: $('activity-label'),
+  activityTime: $('activity-time'),
   input: $('input'),
   send: $('send'),
   stop: $('stop'),
@@ -403,6 +415,7 @@ function appendThinking(text) {
 
 /** 思考开始时先插一个带计时的展开块，边想边显示。 */
 function beginThinking(index) {
+  setActivity('正在思考…');
   const details = document.createElement('details');
   details.className = 'thinking live';
   details.open = true;
@@ -480,6 +493,7 @@ function flushThinking() {
 }
 
 function appendToolUse(block) {
+  setActivity(`正在运行 ${block.name}…`);
   const card = document.createElement('div');
   card.className = 'tool-card';
   card.dataset.toolId = block.id;
@@ -548,6 +562,7 @@ function attachToolResult(toolUseId, text, isError) {
   entry.resultPre.textContent = clipped;
   entry.status.className = `tool-status ${isError ? 'error' : 'done'}`;
   entry.status.textContent = isError ? '失败' : '完成';
+  if (state.running) setActivity('等待模型响应…');
   scrollToBottom();
 }
 
@@ -577,6 +592,7 @@ function appendNotice(text) {
 /* ---------------- 流式输出 ---------------- */
 
 function startStreaming() {
+  setActivity('正在回复…');
   const wrap = document.createElement('div');
   wrap.className = 'msg assistant';
   const md = document.createElement('div');
@@ -689,10 +705,22 @@ function handleUser(message) {
   }
 }
 
+function handleToolProgress(message) {
+  const seconds = Number(message.elapsed_time_seconds) || 0;
+  const entry = state.toolCards.get(message.tool_use_id);
+  if (entry && !entry.hasResult) {
+    entry.status.textContent = `运行中 · ${formatElapsed(seconds * 1000)}`;
+  }
+  if (state.running && !state.awaitingUser) {
+    setActivity(`正在运行 ${message.tool_name || '工具'}…`, performance.now() - seconds * 1000);
+  }
+}
+
 function handleResult(message) {
   flushThinking();
   finalizeStream();
   clearInsertBadges();
+  state.awaitingUser = false;
   const interrupted = /interrupt|aborted/i.test(
     [message.result, ...(Array.isArray(message.errors) ? message.errors : [])].filter(Boolean).join(' ')
   );
@@ -705,6 +733,12 @@ function handleResult(message) {
   }
   appendStats(message);
   setRunning(false);
+  finishActivity(
+    interrupted ? '已停止生成' : message.duration_ms
+      ? `已完成 · 本轮用时 ${formatDuration(message.duration_ms)}`
+      : '已完成',
+    interrupted ? 'stopped' : 'done'
+  );
 
   // 新会话的第一轮结束后它才会出现在历史列表里，这里补一次刷新
   if (state.sessionId && !state.sessions.some((item) => item.sessionId === state.sessionId)) {
@@ -736,6 +770,7 @@ function handleSystem(message) {
 }
 
 function handleEvent(message) {
+  state.lastEventAt = Date.now();
   try {
     switch (message.type) {
       case 'system':
@@ -750,6 +785,9 @@ function handleEvent(message) {
       case 'user':
         handleUser(message);
         break;
+      case 'tool_progress':
+        handleToolProgress(message);
+        break;
       case 'result':
         handleResult(message);
         break;
@@ -762,6 +800,99 @@ function handleEvent(message) {
 }
 
 /* ---------------- 状态与界面 ---------------- */
+
+const STALL_MS = 90_000;
+const ACTIVITY_HIDE_MS = 5_000;
+const ACTIVITY_STATES = ['done', 'stopped', 'error'];
+
+function clearActivityState() {
+  els.activityBar.classList.remove(...ACTIVITY_STATES);
+}
+
+function updateActivityTime() {
+  if (!state.activityStartedAt) return;
+  els.activityTime.textContent = formatElapsed(performance.now() - state.activityStartedAt);
+
+  let label = state.activityLabel;
+  if (state.running && !state.awaitingUser) {
+    const idle = Date.now() - state.lastEventAt;
+    if (idle > STALL_MS) label = `可能已卡住：${Math.round(idle / 1000)} 秒无响应`;
+  }
+  els.activityLabel.textContent = label;
+}
+
+/** 显示当前正在做什么，并开始计时。 */
+function setActivity(label, startedAt = performance.now()) {
+  if (state.replaying) return;
+  if (state.activityHideTimer) {
+    clearTimeout(state.activityHideTimer);
+    state.activityHideTimer = null;
+  }
+  state.activityLabel = label;
+  state.activityStartedAt = startedAt;
+  state.lastEventAt = Date.now();
+  clearActivityState();
+  els.activityBar.hidden = false;
+  updateActivityTime();
+  if (!state.activityTimer) state.activityTimer = setInterval(updateActivityTime, 200);
+}
+
+/** 本轮结束：显示最终结果，几秒后自动隐藏。kind: done / stopped / error */
+function finishActivity(label, kind = 'done') {
+  if (state.replaying) return;
+  if (state.activityTimer) {
+    clearInterval(state.activityTimer);
+    state.activityTimer = null;
+  }
+  state.activityStartedAt = 0;
+  state.activityLabel = label;
+  clearActivityState();
+  els.activityBar.classList.add(kind);
+  els.activityBar.hidden = false;
+  els.activityLabel.textContent = label;
+  els.activityTime.textContent = '';
+  if (state.activityHideTimer) clearTimeout(state.activityHideTimer);
+  state.activityHideTimer = setTimeout(() => {
+    state.activityHideTimer = null;
+    els.activityBar.hidden = true;
+    clearActivityState();
+  }, ACTIVITY_HIDE_MS);
+}
+
+function clearActivity() {
+  if (state.activityTimer) {
+    clearInterval(state.activityTimer);
+    state.activityTimer = null;
+  }
+  if (state.activityHideTimer) {
+    clearTimeout(state.activityHideTimer);
+    state.activityHideTimer = null;
+  }
+  state.activityStartedAt = 0;
+  state.activityLabel = '';
+  els.activityBar.hidden = true;
+  clearActivityState();
+  els.activityLabel.textContent = '';
+  els.activityTime.textContent = '';
+}
+
+/** 把还没拿到结果的工具卡片标成已中断。 */
+function markUnfinishedTools() {
+  for (const entry of state.toolCards.values()) {
+    if (entry.hasResult) continue;
+    entry.status.className = 'tool-status error';
+    entry.status.textContent = '已中断';
+  }
+}
+
+/** 会话没给出完成结果就结束了：提示用户，并标记未完成的工具。 */
+function handleUnexpectedEnd() {
+  finishActivity('本轮任务未完成', 'error');
+  appendNotice('本轮任务未完成：会话已结束（没有收到完成结果）');
+  markUnfinishedTools();
+  const detail = state.lastStderr.trim().split('\n').filter(Boolean).pop();
+  if (detail) showError(`会话异常结束：${detail.slice(0, 300)}`);
+}
 
 function setRunning(running) {
   state.running = running;
@@ -850,7 +981,11 @@ function resetConversation() {
   state.toolCards.clear();
   state.sessionId = null;
   state.sessionActive = false;
+  state.switching = false;
+  state.awaitingUser = false;
+  state.lastStderr = '';
   clearPrompts();
+  clearActivity();
   hideSlashPalette();
   updateSessionTitle('');
   els.sessionMeta.textContent = '';
@@ -1324,7 +1459,15 @@ async function refreshMcp() {
   }
 }
 
+/** 当前回合还在运行时切换会话会中断任务，先跟用户确认。 */
+function confirmSwitchAway() {
+  if (!state.running && !state.sending) return true;
+  return window.confirm('当前任务还在运行，切换会话会中断它。确定要切换吗？');
+}
+
 async function createSessionInDir(dir) {
+  if (!confirmSwitchAway()) return;
+  state.switching = true;
   await window.desk.closeSession();
   resetConversation();
   setCwd(dir);
@@ -1332,6 +1475,8 @@ async function createSessionInDir(dir) {
 }
 
 async function newSession() {
+  if (!confirmSwitchAway()) return;
+  state.switching = true;
   await window.desk.closeSession();
   resetConversation();
   els.input.focus();
@@ -1339,6 +1484,9 @@ async function newSession() {
 }
 
 async function resumeSession(session) {
+  if (!confirmSwitchAway()) return;
+  state.switching = true;
+  clearActivity();
   await window.desk.closeSession();
   const dir = session.cwd || state.cwd;
   flushThinking();
@@ -1346,32 +1494,39 @@ async function resumeSession(session) {
   state.toolCards.clear();
   state.streamEl = null;
   state.sessionId = session.sessionId;
+  state.switching = false;
+  state.lastStderr = '';
   clearPrompts();
   if (dir) setCwd(dir, true);
   updateSessionTitle(session.title);
 
   const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
-  if (history?.ok && Array.isArray(history.messages)) {
-    for (const item of history.messages) {
-      const payload = { ...item, session_id: session.sessionId };
-      if (item.type === 'user') {
-        const content = item.message?.content;
-        if (typeof content === 'string') {
-          appendUserMessage(content, false, item.uuid);
-        } else if (Array.isArray(content)) {
-          const text = content
-            .filter((block) => block.type === 'text' && block.text)
-            .map((block) => block.text)
-            .join('\n');
-          if (text) appendUserMessage(text, false, item.uuid);
-          handleUser(payload);
-        } else {
-          handleUser(payload);
+  state.replaying = true;
+  try {
+    if (history?.ok && Array.isArray(history.messages)) {
+      for (const item of history.messages) {
+        const payload = { ...item, session_id: session.sessionId };
+        if (item.type === 'user') {
+          const content = item.message?.content;
+          if (typeof content === 'string') {
+            appendUserMessage(content, false, item.uuid);
+          } else if (Array.isArray(content)) {
+            const text = content
+              .filter((block) => block.type === 'text' && block.text)
+              .map((block) => block.text)
+              .join('\n');
+            if (text) appendUserMessage(text, false, item.uuid);
+            handleUser(payload);
+          } else {
+            handleUser(payload);
+          }
+        } else if (item.type === 'assistant') {
+          handleAssistant(payload);
         }
-      } else if (item.type === 'assistant') {
-        handleAssistant(payload);
       }
     }
+  } finally {
+    state.replaying = false;
   }
 
   const result = await window.desk.resumeSession({
@@ -1397,6 +1552,7 @@ function clearPermissionUI() {
 function clearPrompts() {
   state.currentQuestion = null;
   state.currentPlan = null;
+  state.awaitingUser = false;
   els.questionModal.hidden = true;
   els.planModal.hidden = true;
   clearPermissionUI();
@@ -1420,6 +1576,8 @@ function pumpPermission() {
   els.permAllowSession.hidden = !request.canAlwaysAllow;
   els.permModal.hidden = false;
   els.permAllow.focus();
+  state.awaitingUser = true;
+  setActivity('等待你确认权限…');
 }
 
 async function answerPermission(decision) {
@@ -1428,6 +1586,8 @@ async function answerPermission(decision) {
   state.currentPermission = null;
   els.permModal.hidden = true;
   await window.desk.respondPermission(request.id, decision);
+  state.awaitingUser = false;
+  setActivity('等待模型响应…');
   pumpPermission();
 }
 
@@ -1517,6 +1677,8 @@ function showQuestion(request) {
   });
   els.questionModal.hidden = false;
   els.questionSubmit.focus();
+  state.awaitingUser = true;
+  setActivity('等待你回答问题…');
 }
 
 function collectAnswers() {
@@ -1557,6 +1719,8 @@ async function submitQuestion() {
   } else {
     await window.desk.respondQuestion(request.id, { response: '用户没有做出选择，请自行判断后继续。' });
   }
+  state.awaitingUser = false;
+  setActivity('等待模型响应…');
 }
 
 async function skipQuestion() {
@@ -1565,6 +1729,8 @@ async function skipQuestion() {
   state.currentQuestion = null;
   els.questionModal.hidden = true;
   await window.desk.respondQuestion(request.id, { response: '用户跳过了这些问题，请自行判断后继续。' });
+  state.awaitingUser = false;
+  setActivity('等待模型响应…');
 }
 
 /* ---------------- 计划审批 ---------------- */
@@ -1578,6 +1744,8 @@ function showPlan(request) {
   els.planReject.textContent = '拒绝，继续修改';
   els.planModal.hidden = false;
   els.planApprove.focus();
+  state.awaitingUser = true;
+  setActivity('等待你审批计划…');
 }
 
 async function respondPlan(decision) {
@@ -1599,6 +1767,8 @@ async function respondPlan(decision) {
 
   await window.desk.respondPlan(request.id, decision, undefined, decision === 'reject' ? feedback : undefined);
   if (decision === 'approve' && state.sessionActive) window.desk.setPermissionMode('default');
+  state.awaitingUser = false;
+  setActivity('等待模型响应…');
 }
 
 /* ---------------- 斜杠命令 ---------------- */
@@ -1962,10 +2132,14 @@ async function sendMessage() {
     autosize();
     hideSlashPalette();
     setRunning(true);
+    state.lastStderr = '';
+    state.awaitingUser = false;
+    setActivity('等待模型响应…');
 
     const result = await window.desk.send(text, { steer });
     if (!result?.ok) {
       setRunning(false);
+      finishActivity('发送失败', 'error');
       showError(result?.error || '发送失败');
     } else if (result.uuid) {
       addMessageActions(bubble, result.uuid);
@@ -1976,6 +2150,7 @@ async function sendMessage() {
 }
 
 async function stopCurrent() {
+  if (state.running) setActivity('正在停止…');
   await window.desk.interrupt();
   setRunning(false);
 }
@@ -2165,6 +2340,7 @@ async function init() {
 
   window.desk.onEvent(handleEvent);
   window.desk.onState((payload) => {
+    const wasRunning = state.running;
     if (payload.status === 'starting') setRunning(true);
     if (payload.status === 'running') setRunning(true);
     if (payload.status === 'idle') {
@@ -2174,6 +2350,8 @@ async function init() {
     }
     if (payload.sessionId) state.sessionId = payload.sessionId;
     if (payload.ended) {
+      const sameSession = !payload.sessionId || payload.sessionId === state.sessionId;
+      if (wasRunning && sameSession && !state.switching) handleUnexpectedEnd();
       state.sessionActive = false;
       clearPrompts();
     }
@@ -2203,8 +2381,14 @@ async function init() {
     finalizeStream();
     clearInsertBadges();
     clearPrompts();
+    markUnfinishedTools();
     setRunning(false);
+    finishActivity('任务出错', 'error');
     showError(payload?.message || '会话出错');
+  });
+  window.desk.onStderr((text) => {
+    if (!text) return;
+    state.lastStderr = (state.lastStderr + String(text)).slice(-1000);
   });
   window.desk.onNewSession(newSession);
   window.desk.onPickDirectory(async () => {

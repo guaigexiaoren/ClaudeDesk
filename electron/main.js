@@ -741,6 +741,7 @@ function attachSession() {
   session.on('error', (err) => send('session:error', { message: err?.message || String(err) }));
   session.on('stderr', (data) => {
     if (process.env.CLAUDE_DESK_DEBUG) console.error('[claude]', data);
+    send('session:stderr', String(data || ''));
   });
 
   session.on('state', (state) => {

@@ -16,6 +16,8 @@ function buildSessionGroups(sessions, trash, currentDir, options = {}) {
   const query = (options.query || '').trim().toLowerCase();
   const groups = new Map();
   const pinnedSessions = [];
+  // 按创建时间排序，会话创建后位置就固定下来，不会因为发消息而跳到最上面
+  const orderTime = (session) => session.createdAt || session.lastModified || 0;
 
   const ensure = (dir) => {
     if (!groups.has(dir)) groups.set(dir, { dir, sessions: [], latest: 0 });
@@ -38,7 +40,7 @@ function buildSessionGroups(sessions, trash, currentDir, options = {}) {
     const dir = session.cwd || '(未知目录)';
     const group = ensure(dir);
     group.sessions.push(session);
-    group.latest = Math.max(group.latest, session.lastModified || 0);
+    group.latest = Math.max(group.latest, orderTime(session));
   }
 
   if (currentDir && !query) ensure(currentDir);
@@ -46,14 +48,14 @@ function buildSessionGroups(sessions, trash, currentDir, options = {}) {
   const normal = [...groups.values()]
     .map((group) => ({
       ...group,
-      sessions: group.sessions.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0)),
+      sessions: group.sessions.sort((a, b) => orderTime(b) - orderTime(a)),
       name: group.dir.split(/[\\/]/).filter(Boolean).pop() || group.dir,
     }))
     .sort((a, b) => b.latest - a.latest);
 
   if (pinnedSessions.length === 0) return normal;
 
-  pinnedSessions.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
+  pinnedSessions.sort((a, b) => orderTime(b) - orderTime(a));
   return [
     {
       dir: '',

@@ -6,17 +6,28 @@ const assert = require('node:assert');
 const { buildSessionGroups } = require('../renderer/session-groups');
 
 const SESSIONS = [
-  { sessionId: 'a', cwd: 'C:\\work\\alpha', lastModified: 100 },
-  { sessionId: 'b', cwd: 'C:\\work\\alpha', lastModified: 300 },
-  { sessionId: 'c', cwd: 'C:\\work\\beta', lastModified: 200 },
+  { sessionId: 'a', cwd: 'C:\\work\\alpha', lastModified: 100, createdAt: 100 },
+  { sessionId: 'b', cwd: 'C:\\work\\alpha', lastModified: 50, createdAt: 300 },
+  { sessionId: 'c', cwd: 'C:\\work\\beta', lastModified: 999, createdAt: 200 },
 ];
 
-test('按目录分组，并按最近修改时间排序', () => {
+test('按目录分组，并按创建时间排序', () => {
   const groups = buildSessionGroups(SESSIONS, [], '');
   assert.equal(groups.length, 2);
   assert.equal(groups[0].name, 'alpha');
   assert.deepEqual(
     groups[0].sessions.map((session) => session.sessionId),
+    ['b', 'a']
+  );
+});
+
+test('发消息更新最后修改时间后，顺序保持不变', () => {
+  const updated = SESSIONS.map((session) =>
+    session.sessionId === 'a' ? { ...session, lastModified: 99999 } : session
+  );
+  const groups = buildSessionGroups(updated, [], '');
+  assert.deepEqual(
+    groups.find((group) => group.name === 'alpha').sessions.map((session) => session.sessionId),
     ['b', 'a']
   );
 });
