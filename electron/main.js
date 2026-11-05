@@ -46,7 +46,10 @@ const sessions = new Map();
 let focusedKey = null;
 let terminal = null;
 let isQuitting = false;
+let idleTimer = null;
 const QUICK_SHORTCUT = 'CommandOrControl+Alt+Space';
+const IDLE_CLOSE_MS = Number(process.env.CLAUDE_DESK_IDLE_MS) || 30 * 60 * 1000;
+const IDLE_CHECK_MS = Math.min(60_000, IDLE_CLOSE_MS);
 
 function createWindow() {
   const settings = store.get();
@@ -755,14 +758,31 @@ function resolveClaudeExecutable() {
 
 function createSessionManager(key) {
   const manager = new SessionManager({ claudeExecutable: resolveClaudeExecutable() });
+  manager.lastActiveAt = Date.now();
+  const touch = () => {
+    manager.lastActiveAt = Date.now();
+  };
 
   manager.on('state', (state) => {
+    touch();
     send('session:state', { key, ...state });
   });
-  manager.on('message', (message) => send('session:event', { key, message }));
-  manager.on('permission', (request) => send('session:permission', { key, request }));
-  manager.on('question', (request) => send('session:question', { key, request }));
-  manager.on('plan', (request) => send('session:plan', { key, request }));
+  manager.on('message', (message) => {
+    touch();
+    send('session:event', { key, message });
+  });
+  manager.on('permission', (request) => {
+    touch();
+    send('session:permission', { key, request });
+  });
+  manager.on('question', (request) => {
+    touch();
+    send('session:question', { key, request });
+  });
+  manager.on('plan', (request) => {
+    touch();
+    send('session:plan', { key, request });
+  });
   manager.on('commands', (commands) => send('session:commands', { key, commands }));
   manager.on('error', (err) => send('session:error', { key, message: err?.message || String(err) }));
   manager.on('stderr', (data) => {
@@ -784,6 +804,24 @@ function closeAllSessions() {
   }
   sessions.clear();
   focusedKey = null;
+}
+
+/** 后台空闲会话定时回收，避免每个对话一直占着一个 CLI 进程。 */
+function startIdleReaper() {
+  if (idleTimer) return;
+  idleTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, manager] of [...sessions]) {
+      if (key === focusedKey) continue;
+      if (manager.starting || manager.status === 'running') continue;
+      if (manager.pendingPermissions.size > 0) continue;
+      if (now - (manager.lastActiveAt || 0) < IDLE_CLOSE_MS) continue;
+      sessions.delete(key);
+      manager.close().catch(() => {});
+      send('session:released', { key });
+    }
+  }, IDLE_CHECK_MS);
+  idleTimer.unref?.();
 }
 
 async function closeSessionManager(key) {
@@ -1124,6 +1162,17 @@ function registerIpc() {
   ipcMain.handle('session:close', safe(async ({ key } = {}) => closeSessionManager(key)));
 
   ipcMain.handle(
+    'session:focus',
+    safe(async ({ key } = {}) => {
+      const manager = getSessionManager(key);
+      if (!manager) return { ok: true, attached: false };
+      focusedKey = key;
+      manager.lastActiveAt = Date.now();
+      return { ok: true, attached: true };
+    })
+  );
+
+  ipcMain.handle(
     'permission:respond',
     safe(async ({ key, id, decision } = {}) => {
       const manager = getSessionManager(key);
@@ -1242,6 +1291,7 @@ if (!gotLock) {
     registerIpc();
     buildMenu();
     createWindow();
+    startIdleReaper();
 
     if (!IS_SMOKE) {
       try {
@@ -1268,6 +1318,10 @@ if (!gotLock) {
   app.on('before-quit', () => {
     isQuitting = true;
     globalShortcut.unregisterAll();
+    if (idleTimer) {
+      clearInterval(idleTimer);
+      idleTimer = null;
+    }
     if (terminal) terminal.stop();
     closeAllSessions();
   });

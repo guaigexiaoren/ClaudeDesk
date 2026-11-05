@@ -1060,6 +1060,10 @@ select:hover {
   font-size: 11px;
 }
 
+.terminal-cwd.mismatch {
+  color: var(--yellow);
+}
+
 .terminal-actions {
   display: flex;
   align-items: center;
