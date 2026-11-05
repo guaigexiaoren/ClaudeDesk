@@ -769,8 +769,12 @@ function handleSystem(message) {
       state.mcpStatus = Object.fromEntries(message.mcp_servers.map((server) => [server.name, server.status]));
     }
     state.terminalCommands = new Set(message.terminal_slash_commands || []);
-    if (state.commands.length === 0) {
-      state.commands = (message.slash_commands || []).map((name) => ({ name, description: '' }));
+    const commands = (message.slash_commands || []).map((name) => ({ name, description: '' }));
+    if (state.activeKey) state.commandsByKey.set(state.activeKey, commands);
+    if (state.commands.length === 0) state.commands = commands;
+    // 新会话第一次 init 时还没进入历史列表，立刻刷新一次并高亮当前会话
+    if (!state.sessions.some((session) => session.sessionId === message.session_id)) {
+      refreshSessions();
     }
   } else if (message.subtype === 'permission_denied') {
     appendNotice(`已自动拒绝工具调用：${message.tool_name}`);
