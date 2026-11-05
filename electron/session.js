@@ -159,14 +159,26 @@ class SessionManager extends EventEmitter {
       }
       if (!isCurrent()) return;
       this.status = 'idle';
+      this._settlePending('会话已结束。');
+      this.query = null;
+      if (this.queue) {
+        this.queue.close();
+        this.queue = null;
+      }
       this._emitState({ ended: true });
     } catch (err) {
       if (!isCurrent()) return;
-      if (this.controller?.signal.aborted) {
-        this.status = 'idle';
+      const aborted = Boolean(this.controller?.signal.aborted);
+      this._settlePending(aborted ? '会话已中断。' : '会话异常结束。');
+      this.status = 'idle';
+      this.query = null;
+      if (this.queue) {
+        this.queue.close();
+        this.queue = null;
+      }
+      if (aborted) {
         this._emitState();
       } else {
-        this.status = 'idle';
         this.emit('error', err);
         this._emitState({ ended: true });
       }
@@ -277,14 +289,17 @@ class SessionManager extends EventEmitter {
       entry.resolve({ behavior: 'deny', message: '用户拒绝了这次操作。' });
     } else if (decision === 'allow-session') {
       entry.resolve({ behavior: 'allow', updatedPermissions: entry.suggestions });
-    } else {
+    } else if (decision === 'allow') {
       entry.resolve({ behavior: 'allow' });
+    } else {
+      entry.resolve({ behavior: 'deny', message: '未知的权限决定，已拒绝。' });
     }
     return { ok: true };
   }
 
   async interrupt() {
     if (!this.query) return { ok: false };
+    this._settlePending('用户停止了当前回合。');
     await this.query.interrupt();
     return { ok: true };
   }
@@ -308,11 +323,15 @@ class SessionManager extends EventEmitter {
     return this.query.rewindFiles(userMessageId, options);
   }
 
-  async close() {
+  _settlePending(message) {
     for (const [, entry] of this.pendingPermissions) {
-      entry.resolve({ behavior: 'deny', message: '会话已关闭。' });
+      entry.resolve({ behavior: 'deny', message });
     }
     this.pendingPermissions.clear();
+  }
+
+  async close() {
+    this._settlePending('会话已关闭。');
     if (this.queue) {
       this.queue.close();
       this.queue = null;

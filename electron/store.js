@@ -52,7 +52,9 @@ class Store {
   _save() {
     try {
       fs.mkdirSync(this.dir, { recursive: true });
-      fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2), 'utf8');
+      const temp = `${this.file}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.renameSync(temp, this.file);
     } catch (err) {
       console.error('[store] 保存设置失败:', err);
     }

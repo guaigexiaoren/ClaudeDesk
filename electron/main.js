@@ -74,6 +74,22 @@ function createWindow() {
   });
 
   mainWindow.setMenuBarVisibility(false);
+
+  let rendererLoaded = false;
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererLoaded = true;
+  });
+  // 页面刷新/渲染进程崩溃后，旧会话进程会变成无法关闭的孤儿，这里统一回收
+  mainWindow.webContents.on('did-start-loading', () => {
+    if (!rendererLoaded) return;
+    rendererLoaded = false;
+    closeAllSessions();
+  });
+  mainWindow.webContents.on('render-process-gone', () => {
+    rendererLoaded = false;
+    closeAllSessions();
+  });
+
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
   mainWindow.once('ready-to-show', () => {
@@ -742,10 +758,6 @@ function createSessionManager(key) {
 
   manager.on('state', (state) => {
     send('session:state', { key, ...state });
-    // 只有当前操作的会话才更新「上次会话」，避免后台会话把设置写乱
-    if (state.sessionId && key === focusedKey) {
-      store.merge({ lastSessionId: state.sessionId, cwd: state.cwd || store.get().cwd });
-    }
   });
   manager.on('message', (message) => send('session:event', { key, message }));
   manager.on('permission', (request) => send('session:permission', { key, request }));
@@ -764,6 +776,14 @@ function createSessionManager(key) {
 
 function getSessionManager(key) {
   return key ? sessions.get(key) || null : null;
+}
+
+function closeAllSessions() {
+  for (const manager of sessions.values()) {
+    manager.close().catch(() => {});
+  }
+  sessions.clear();
+  focusedKey = null;
 }
 
 async function closeSessionManager(key) {
@@ -834,6 +854,7 @@ function registerIpc() {
     safe(async ({ path: target } = {}) => {
       if (!target) return { ok: false, error: '缺少文件路径' };
       const stat = await fs.promises.stat(target);
+      if (!stat.isFile()) return { ok: false, error: '只能添加文件' };
       const name = path.basename(target);
       const ext = path.extname(target).toLowerCase();
       const imageTypes = {
@@ -1248,7 +1269,6 @@ if (!gotLock) {
     isQuitting = true;
     globalShortcut.unregisterAll();
     if (terminal) terminal.stop();
-    for (const manager of sessions.values()) manager.close();
-    sessions.clear();
+    closeAllSessions();
   });
 }

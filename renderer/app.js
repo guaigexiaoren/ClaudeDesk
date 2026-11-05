@@ -121,6 +121,7 @@ const state = {
   lastStderrByKey: new Map(),
   running: false,
   sending: false,
+  interruptRequested: false,
   attachments: [],
   streamEl: null,
   thinkingLive: [],
@@ -419,8 +420,16 @@ function addAttachment(entry) {
 }
 
 async function addAttachmentPaths(paths) {
+  const target = state.attachments;
   for (const filePath of paths || []) {
+    if (state.attachments !== target) return;
+    if (state.attachments.length >= MAX_ATTACHMENTS) {
+      showError(`一次最多添加 ${MAX_ATTACHMENTS} 个附件`);
+      return;
+    }
     const result = await window.desk.describeFile(filePath);
+    // 读取期间发送/切换了会话，附件数组已被替换，丢弃迟到结果
+    if (state.attachments !== target) return;
     if (!result?.ok) {
       showError(result?.error || '读取文件失败');
       continue;
@@ -439,7 +448,13 @@ function readFileAsDataUrl(file) {
 }
 
 async function addAttachmentFiles(files) {
+  const target = state.attachments;
   for (const file of files || []) {
+    if (state.attachments !== target) return;
+    if (state.attachments.length >= MAX_ATTACHMENTS) {
+      showError(`一次最多添加 ${MAX_ATTACHMENTS} 个附件`);
+      return;
+    }
     if (file.type && file.type.startsWith('image/')) {
       if (!IMAGE_TYPES.has(file.type)) {
         showError('只支持 PNG、JPG、GIF、WebP 图片');
@@ -451,6 +466,7 @@ async function addAttachmentFiles(files) {
       }
       try {
         const dataUrl = await readFileAsDataUrl(file);
+        if (state.attachments !== target) return;
         const comma = dataUrl.indexOf(',');
         addAttachment({
           kind: 'image',
@@ -972,9 +988,10 @@ function handleResult(message) {
   finalizeStream();
   clearInsertBadges();
   state.awaitingUser = false;
-  const interrupted = /interrupt|aborted/i.test(
-    [message.result, ...(Array.isArray(message.errors) ? message.errors : [])].filter(Boolean).join(' ')
-  );
+  const interrupted = state.interruptRequested;
+  state.interruptRequested = false;
+  clearPrompts(state.activeKey);
+  markUnfinishedTools();
   if (interrupted) {
     appendNotice('已停止生成');
   } else if (message.is_error && message.result) {
@@ -1052,7 +1069,10 @@ function handleSessionState(key, payload) {
       state.startedKeys.delete(key);
       state.activityByKey.delete(key);
       const status = state.sessionStatus.get(key);
-      setSessionStatus(key, status === 'working' || status === 'waiting' ? 'error' : null);
+      setSessionStatus(
+        key,
+        status === 'working' || status === 'waiting' || status === 'error' ? 'error' : null
+      );
       clearPrompts(key);
     }
     return;
@@ -1065,6 +1085,7 @@ function handleSessionState(key, payload) {
     // 会话结束/报错时收尾，避免思考计时器一直跑
     flushThinking();
     setRunning(false);
+    if (state.activityLabel === '正在停止…') finishActivity('已停止生成', 'stopped');
   }
   if (payload.sessionId) state.sessionId = payload.sessionId;
   if (payload.ended) {
@@ -1072,6 +1093,7 @@ function handleSessionState(key, payload) {
     const stopping = state.activityLabel === '正在停止…';
     state.startedKeys.delete(key);
     state.activityByKey.delete(key);
+    state.interruptRequested = false;
     if (hadTurn) {
       if (stopping) finishActivity('已停止生成', 'stopped');
       else handleUnexpectedEnd();
@@ -1089,6 +1111,7 @@ function handleSessionError(key, text) {
   state.activityByKey.delete(key);
   if (key !== state.activeKey) {
     setSessionStatus(key, 'error');
+    clearPrompts(key);
     return;
   }
   flushThinking();
@@ -1223,6 +1246,8 @@ function markUnfinishedTools() {
 
 /** 会话没给出完成结果就结束了：提示用户，并标记未完成的工具。 */
 function handleUnexpectedEnd() {
+  finalizeStream();
+  clearInsertBadges();
   finishActivity('本轮任务未完成', 'error');
   appendNotice('本轮任务未完成：会话已结束（没有收到完成结果）');
   markUnfinishedTools();
@@ -1279,15 +1304,13 @@ function updateSessionStatusFromEvent(key, message) {
       break;
     case 'result': {
       state.activityByKey.delete(key);
-      const interrupted = /interrupt|aborted/i.test(
-        [message.result, ...(Array.isArray(message.errors) ? message.errors : [])]
-          .filter(Boolean)
-          .join(' ')
-      );
-      if (interrupted) setSessionStatus(key, null);
-      else if (message.is_error || message.subtype !== 'success') {
+      if (key === state.activeKey && state.interruptRequested) {
+        setSessionStatus(key, null);
+      } else if (message.is_error || message.subtype !== 'success') {
         setSessionStatus(key, key === state.activeKey ? null : 'error');
-      } else setSessionStatus(key, key === state.activeKey ? null : 'done');
+      } else {
+        setSessionStatus(key, key === state.activeKey ? null : 'done');
+      }
       // 新会话第一次跑完后才会出现在会话列表里，后台会话也要补一次刷新
       const sessionId = state.keyToSession.get(key);
       if (sessionId && !state.sessions.some((item) => item.sessionId === sessionId)) {
@@ -1453,6 +1476,8 @@ function updateSessionTitle(title) {
 
 function resetConversation() {
   state.switchToken += 1;
+  state.interruptRequested = false;
+  if (!els.findBar.hidden) closeFindBar();
   flushThinking();
   els.messages.innerHTML = `
     <div class="welcome">
@@ -1675,6 +1700,8 @@ function startRename(session, item) {
   input.className = 'rename-input';
   input.value = session.title || '';
   titleEl.replaceWith(input);
+  input.addEventListener('mousedown', (event) => event.stopPropagation());
+  input.addEventListener('click', (event) => event.stopPropagation());
   input.focus();
   input.select();
 
@@ -1979,8 +2006,9 @@ async function newSession() {
 
 /** 关闭某个会话的后端进程（删除/移入回收站时用）。 */
 async function closeSessionBackend(sessionId) {
-  const key = state.sessionKeys.get(sessionId);
-  if (!key) return;
+  if (!sessionId) return;
+  // 恢复中的会话可能还没走到 init，映射还没建立，用 sessionId 兜底
+  const key = state.sessionKeys.get(sessionId) || sessionId;
   state.closedKeys.add(key);
   state.startedKeys.delete(key);
   state.sessionStatus.delete(key);
@@ -2008,11 +2036,15 @@ async function resumeSession(session) {
 
   const token = ++state.switchToken;
   state.closedKeys.delete(key);
+  state.interruptRequested = false;
   const dir = session.cwd || state.cwd;
   state.activeKey = key;
   state.sessionId = session.sessionId;
   state.sessionActive = state.startedKeys.has(key);
   state.keyTitles.set(key, session.title || state.keyTitles.get(key) || '当前会话');
+  clearError();
+  if (!els.findBar.hidden) closeFindBar();
+  hideSlashPalette();
 
   const status = state.sessionStatus.get(key);
   const busy = status === 'working' || status === 'waiting';
@@ -2034,6 +2066,7 @@ async function resumeSession(session) {
   }
   if (dir) setCwd(dir, true);
   updateSessionTitle(session.title);
+  renderSessionGroups();
 
   state.pendingEvents = [];
   state.replaying = true;
@@ -2041,6 +2074,9 @@ async function resumeSession(session) {
     const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
     // 快速连续切换时，只让最后一次切换渲染历史
     if (token !== state.switchToken) return;
+    if (history && history.ok === false) {
+      showError(history.error || '读取会话历史失败');
+    }
     if (history?.ok && Array.isArray(history.messages)) {
       for (const item of history.messages) {
         const payload = { ...item, session_id: session.sessionId };
@@ -2061,6 +2097,8 @@ async function resumeSession(session) {
           handleAssistant(payload);
         }
       }
+      // 历史里最后一个工具调用没有结果，说明当时被中断了
+      markUnfinishedTools();
     }
   } finally {
     if (token === state.switchToken) {
@@ -2114,6 +2152,7 @@ function clearPrompts(key) {
   if (!state.currentPermission && !state.currentQuestion && !state.currentPlan) {
     state.awaitingUser = false;
   }
+  pumpPermission();
   pumpQuestions();
   pumpPlans();
 }
@@ -2138,7 +2177,7 @@ function pumpPermission() {
   els.permInput.textContent = JSON.stringify(request.input ?? {}, null, 2);
   els.permAllowSession.hidden = !request.canAlwaysAllow;
   els.permModal.hidden = false;
-  els.permAllow.focus();
+  els.permDeny.focus();
   setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
   if (key === state.activeKey) setActivity('等待你确认权限…');
@@ -2158,6 +2197,7 @@ async function answerPermission(decision) {
   state.awaitingUser = false;
   if (!result?.ok) {
     setSessionStatus(entry.key, null);
+    if (entry.key === state.activeKey) clearActivity();
     showError(result?.error || '响应权限请求失败');
   } else {
     setSessionStatus(entry.key, 'working');
@@ -2269,7 +2309,10 @@ function pumpQuestions() {
   });
   setModalHeading(els.questionModal, 'Claude 想确认一下', key);
   els.questionModal.hidden = false;
-  els.questionSubmit.focus();
+  const firstOption = els.questionList.querySelector(
+    'input[type="radio"], input[type="checkbox"]'
+  );
+  (firstOption || els.questionSkip).focus();
   setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
   if (key === state.activeKey) setActivity('等待你回答问题…');
@@ -2321,6 +2364,7 @@ async function submitQuestion() {
   state.awaitingUser = false;
   if (!result?.ok) {
     setSessionStatus(key, null);
+    if (key === state.activeKey) clearActivity();
     showError(result?.error || '提交回答失败');
   } else {
     setSessionStatus(key, 'working');
@@ -2344,6 +2388,7 @@ async function skipQuestion() {
   state.awaitingUser = false;
   if (!result?.ok) {
     setSessionStatus(key, null);
+    if (key === state.activeKey) clearActivity();
     showError(result?.error || '提交回答失败');
   } else {
     setSessionStatus(key, 'working');
@@ -2374,7 +2419,7 @@ function pumpPlans() {
   els.planReject.textContent = '拒绝，继续修改';
   setModalHeading(els.planModal, '计划待确认', key);
   els.planModal.hidden = false;
-  els.planApprove.focus();
+  els.planReject.focus();
   setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
   if (key === state.activeKey) setActivity('等待你审批计划…');
@@ -2393,12 +2438,6 @@ async function respondPlan(decision) {
   els.planFeedback.value = '';
   els.planReject.textContent = '拒绝，继续修改';
 
-  if (decision === 'approve') {
-    state.permissionMode = 'default';
-    setPermissionModeUI('default');
-    window.desk.saveSettings({ permissionMode: 'default' });
-  }
-
   const result = await window.desk.respondPlan({
     key,
     id: request.id,
@@ -2408,12 +2447,16 @@ async function respondPlan(decision) {
   state.awaitingUser = false;
   if (!result?.ok) {
     setSessionStatus(key, null);
+    if (key === state.activeKey) clearActivity();
     showError(result?.error || '提交计划审批失败');
     pumpPlans();
     return;
   }
-  if (decision === 'approve' && state.sessionActive) {
-    window.desk.setPermissionMode({ key, mode: 'default' });
+  if (decision === 'approve') {
+    if (key === state.activeKey) setPermissionModeUI('default');
+    if (state.startedKeys.has(key)) {
+      window.desk.setPermissionMode({ key, mode: 'default' });
+    }
   }
   setSessionStatus(key, 'working');
   rememberActivity(key, '等待模型响应…');
@@ -2488,6 +2531,10 @@ function moveSlash(delta) {
 }
 
 function applySlash(command) {
+  if (!command) {
+    hideSlashPalette();
+    return;
+  }
   els.input.value = `/${command} `;
   hideSlashPalette();
   els.input.focus();
@@ -2779,46 +2826,57 @@ async function ensureSession() {
 }
 
 async function sendMessage() {
-  if (state.sending) return;
+  if (state.sending || state.replaying) return;
   const text = els.input.value.trim();
   const attachments = state.attachments.slice();
   if (!text && attachments.length === 0) return;
 
+  const viewToken = state.switchToken;
   state.sending = true;
   try {
     clearError();
-    const steer = state.running;
     const ready = await ensureSession();
     if (!ready) return;
+    // 启动/恢复期间用户切走了会话：消息留在输入框，不要发到别的会话
+    if (viewToken !== state.switchToken) return;
+    const key = state.activeKey;
+    if (!key) return;
 
+    const steer = state.running;
     const content = buildMessageContent(text, attachments);
-    const bubble = appendUserMessage(text, steer, '', attachments);
+    setRunning(true);
+    state.interruptRequested = false;
+    state.lastStderrByKey.delete(key);
+    state.awaitingUser = false;
+    setActivity('等待模型响应…');
+
+    const result = await window.desk.send(text, { key, steer, content });
+    if (!result?.ok) {
+      if (key === state.activeKey) {
+        setRunning(false);
+        setSessionStatus(key, null);
+        finishActivity('发送失败', 'error');
+        showError(result?.error || '发送失败');
+      }
+      return;
+    }
+
+    if (key !== state.activeKey) return;
+    appendUserMessage(text, steer, result.uuid || '', attachments);
     els.input.value = '';
     state.attachments = [];
     renderAttachments();
     autosize();
     hideSlashPalette();
-    setRunning(true);
-    state.lastStderrByKey.delete(state.activeKey);
-    state.awaitingUser = false;
-    setActivity('等待模型响应…');
-
-    const result = await window.desk.send(text, { key: state.activeKey, steer, content });
-    if (!result?.ok) {
-      setRunning(false);
-      setSessionStatus(state.activeKey, null);
-      finishActivity('发送失败', 'error');
-      showError(result?.error || '发送失败');
-    } else if (result.uuid) {
-      addMessageActions(bubble, result.uuid);
-    }
   } finally {
     state.sending = false;
   }
 }
 
 async function stopCurrent() {
+  state.interruptRequested = true;
   if (state.running) setActivity('正在停止…');
+  clearPrompts(state.activeKey);
   await window.desk.interrupt({ key: state.activeKey });
   setRunning(false);
 }
@@ -2907,7 +2965,8 @@ async function init() {
       String(file.type || '').startsWith('image/')
     );
     if (files.length === 0) return;
-    event.preventDefault();
+    // 图文混排时保留文本，只额外添加图片
+    if (!event.clipboardData?.getData('text/plain')) event.preventDefault();
     addAttachmentFiles(files);
   });
   for (const target of [els.messages, $('composer')]) {
@@ -2936,7 +2995,7 @@ async function init() {
       }
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        applySlash(state.slashItems[state.slashIndex]);
+        applySlash(state.slashItems[state.slashIndex]?.name);
         return;
       }
       if (event.key === 'Escape') {
@@ -2959,6 +3018,10 @@ async function init() {
     }
     if (event.key !== 'Escape') return;
     if (els.terminalPanel.contains(event.target)) return;
+    if (!els.permissionMenu.hidden) {
+      els.permissionMenu.hidden = true;
+      return;
+    }
     if (!els.findBar.hidden) {
       closeFindBar();
     } else if (!els.settingsModal.hidden) {
@@ -2969,6 +3032,8 @@ async function init() {
       skipQuestion();
     } else if (!els.permModal.hidden) {
       answerPermission('deny');
+    } else if (!els.planModal.hidden) {
+      respondPlan('reject');
     } else if (state.running) {
       stopCurrent();
     }
@@ -3010,11 +3075,6 @@ async function init() {
       els.permissionMenu.hidden = true;
     }
   });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !els.permissionMenu.hidden) {
-      els.permissionMenu.hidden = true;
-    }
-  });
 
   $('open-settings').addEventListener('click', () => {
     els.settingsModal.hidden = false;
@@ -3039,12 +3099,22 @@ async function init() {
 
   window.desk.onEvent(({ key, message }) => handleSessionEvent(key, message));
   window.desk.onState(({ key, ...payload }) => handleSessionState(key, payload));
-  window.desk.onPermission(({ key, request }) => enqueuePermission(key, request));
-  window.desk.onQuestion(({ key, request }) => showQuestion(key, request));
-  window.desk.onPlan(({ key, request }) => showPlan(key, request));
+  window.desk.onPermission(({ key, request }) => {
+    if (!state.closedKeys.has(key)) enqueuePermission(key, request);
+  });
+  window.desk.onQuestion(({ key, request }) => {
+    if (!state.closedKeys.has(key)) showQuestion(key, request);
+  });
+  window.desk.onPlan(({ key, request }) => {
+    if (!state.closedKeys.has(key)) showPlan(key, request);
+  });
   window.desk.onCommands(({ key, commands }) => {
+    if (state.closedKeys.has(key)) return;
     state.commandsByKey.set(key, Array.isArray(commands) ? commands : []);
-    if (key === state.activeKey) handleCommands(commands);
+    if (key === state.activeKey) {
+      handleCommands(commands);
+      updateSlashPalette();
+    }
   });
   window.desk.onPtyData(({ data }) => state.terminal?.write(data));
   window.desk.onPtyExit((info) => {
@@ -3063,7 +3133,7 @@ async function init() {
   window.desk.onMenuFind(openFindBar);
   window.desk.onError(({ key, message }) => handleSessionError(key, message));
   window.desk.onStderr(({ key, text }) => {
-    if (!key || !text) return;
+    if (!key || !text || state.closedKeys.has(key)) return;
     const prev = state.lastStderrByKey.get(key) || '';
     state.lastStderrByKey.set(key, (prev + String(text)).slice(-1000));
   });
@@ -3071,7 +3141,7 @@ async function init() {
   window.desk.onPickDirectory(async () => {
     const picked = await window.desk.pickDirectory();
     if (picked?.ok && picked.path) {
-      if (state.sessionActive) await newSession();
+      if (state.activeKey) await newSession();
       setCwd(picked.path);
     }
   });

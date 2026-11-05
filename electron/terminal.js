@@ -60,9 +60,10 @@ class TerminalSession {
     }
 
     this.cwd = options.cwd;
-    this.proc.onData((data) => onData?.(data));
-    this.proc.onExit(({ exitCode, signal }) => {
-      this.proc = null;
+    const spawned = this.proc;
+    spawned.onData((data) => onData?.(data));
+    spawned.onExit(({ exitCode, signal }) => {
+      if (this.proc === spawned) this.proc = null;
       onExit?.({ exitCode, signal });
     });
 

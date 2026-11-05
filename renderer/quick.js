@@ -12,11 +12,16 @@ async function submit() {
   hint.textContent = '正在发送…';
   try {
     const result = await window.desk.quickSubmit(text);
-    if (!result?.ok) hint.textContent = result?.error || '发送失败';
-    else input.value = '';
+    if (!result?.ok) {
+      hint.textContent = result?.error || '发送失败';
+      return;
+    }
+    input.value = '';
+    hint.textContent = HINT;
+  } catch {
+    hint.textContent = '发送失败';
   } finally {
     sending = false;
-    hint.textContent = HINT;
   }
 }
 
