@@ -111,6 +111,8 @@ const state = {
   // 多会话：key 是后端会话标识，sessionId 是 SDK 会话标识
   activeKey: null,
   startedKeys: new Set(),
+  closedKeys: new Set(),
+  switchToken: 0,
   keyToSession: new Map(),
   sessionKeys: new Map(),
   sessionStatus: new Map(),
@@ -714,10 +716,13 @@ function endThinking(index) {
 
 /** 完整消息到达后，用它替换刚才流式的思考块。 */
 function claimThinking(text) {
+  if (state.thinkingLive.length === 0) return false;
   const matched = state.thinkingLive.findIndex(
     (entry) => entry.body.textContent.trim() === text.trim()
   );
-  const [entry] = state.thinkingLive.splice(matched >= 0 ? matched : 0, 1);
+  // 文本对不上时取最后一条（消息按顺序到达），不要误取第一条
+  const index = matched >= 0 ? matched : state.thinkingLive.length - 1;
+  const [entry] = state.thinkingLive.splice(index, 1);
   if (!entry) return false;
   stopThinkingTimer(entry);
   entry.body.textContent = text;
@@ -926,6 +931,11 @@ function handleAssistant(message) {
     state.streamEl.parentElement?.remove();
     state.streamEl = null;
   }
+
+  // 这条完整消息里没有思考块时，收尾残留的实时思考块，避免呼吸点一直亮
+  if (!message.parent_tool_use_id && !blocks.some((b) => b.type === 'thinking' && b.thinking)) {
+    flushThinking();
+  }
 }
 
 function handleUser(message) {
@@ -1016,7 +1026,7 @@ function handleSystem(message) {
 
 /** 所有会话的事件都从这里进来：后台会话只更新状态灯，不渲染到当前对话。 */
 function handleSessionEvent(key, message) {
-  if (!key || !message) return;
+  if (!key || !message || state.closedKeys.has(key)) return;
   if (message.type === 'system' && message.subtype === 'init') {
     registerSessionKey(key, message.session_id);
   }
@@ -1034,13 +1044,16 @@ function handleSessionEvent(key, message) {
 }
 
 function handleSessionState(key, payload) {
+  if (state.closedKeys.has(key)) return;
   if (payload.sessionId) registerSessionKey(key, payload.sessionId);
 
   if (key !== state.activeKey) {
     if (payload.ended) {
       state.startedKeys.delete(key);
       state.activityByKey.delete(key);
-      if (state.sessionStatus.get(key) === 'working') setSessionStatus(key, 'error');
+      const status = state.sessionStatus.get(key);
+      setSessionStatus(key, status === 'working' || status === 'waiting' ? 'error' : null);
+      clearPrompts(key);
     }
     return;
   }
@@ -1055,8 +1068,15 @@ function handleSessionState(key, payload) {
   }
   if (payload.sessionId) state.sessionId = payload.sessionId;
   if (payload.ended) {
+    const hadTurn = wasRunning || state.activityStartedAt > 0;
+    const stopping = state.activityLabel === '正在停止…';
     state.startedKeys.delete(key);
-    if (wasRunning) handleUnexpectedEnd();
+    state.activityByKey.delete(key);
+    if (hadTurn) {
+      if (stopping) finishActivity('已停止生成', 'stopped');
+      else handleUnexpectedEnd();
+    }
+    setSessionStatus(key, null);
     state.sessionActive = false;
     clearPrompts(key);
   }
@@ -1064,6 +1084,7 @@ function handleSessionState(key, payload) {
 }
 
 function handleSessionError(key, text) {
+  if (state.closedKeys.has(key)) return;
   state.startedKeys.delete(key);
   state.activityByKey.delete(key);
   if (key !== state.activeKey) {
@@ -1075,6 +1096,7 @@ function handleSessionError(key, text) {
   clearInsertBadges();
   clearPrompts(key);
   markUnfinishedTools();
+  setSessionStatus(key, null);
   state.sessionActive = false;
   setRunning(false);
   finishActivity('任务出错', 'error');
@@ -1216,7 +1238,7 @@ function newSessionKey() {
 }
 
 function registerSessionKey(key, sessionId) {
-  if (!key || !sessionId) return;
+  if (!key || !sessionId || state.closedKeys.has(key)) return;
   state.keyToSession.set(key, sessionId);
   state.sessionKeys.set(sessionId, key);
   applySessionStatusToDom(sessionId);
@@ -1263,8 +1285,9 @@ function updateSessionStatusFromEvent(key, message) {
           .join(' ')
       );
       if (interrupted) setSessionStatus(key, null);
-      else if (message.is_error || message.subtype !== 'success') setSessionStatus(key, 'error');
-      else setSessionStatus(key, key === state.activeKey ? null : 'done');
+      else if (message.is_error || message.subtype !== 'success') {
+        setSessionStatus(key, key === state.activeKey ? null : 'error');
+      } else setSessionStatus(key, key === state.activeKey ? null : 'done');
       // 新会话第一次跑完后才会出现在会话列表里，后台会话也要补一次刷新
       const sessionId = state.keyToSession.get(key);
       if (sessionId && !state.sessions.some((item) => item.sessionId === sessionId)) {
@@ -1429,6 +1452,7 @@ function updateSessionTitle(title) {
 }
 
 function resetConversation() {
+  state.switchToken += 1;
   flushThinking();
   els.messages.innerHTML = `
     <div class="welcome">
@@ -1957,6 +1981,7 @@ async function newSession() {
 async function closeSessionBackend(sessionId) {
   const key = state.sessionKeys.get(sessionId);
   if (!key) return;
+  state.closedKeys.add(key);
   state.startedKeys.delete(key);
   state.sessionStatus.delete(key);
   state.sessionKeys.delete(sessionId);
@@ -1981,6 +2006,8 @@ async function resumeSession(session) {
     return;
   }
 
+  const token = ++state.switchToken;
+  state.closedKeys.delete(key);
   const dir = session.cwd || state.cwd;
   state.activeKey = key;
   state.sessionId = session.sessionId;
@@ -2012,6 +2039,8 @@ async function resumeSession(session) {
   state.replaying = true;
   try {
     const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
+    // 快速连续切换时，只让最后一次切换渲染历史
+    if (token !== state.switchToken) return;
     if (history?.ok && Array.isArray(history.messages)) {
       for (const item of history.messages) {
         const payload = { ...item, session_id: session.sessionId };
@@ -2034,13 +2063,17 @@ async function resumeSession(session) {
       }
     }
   } finally {
-    state.replaying = false;
-    const pending = state.pendingEvents;
-    state.pendingEvents = [];
-    if (key === state.activeKey) {
-      for (const message of pending) handleEvent(message);
+    if (token === state.switchToken) {
+      state.replaying = false;
+      const pending = state.pendingEvents;
+      state.pendingEvents = [];
+      if (key === state.activeKey) {
+        for (const message of pending) handleEvent(message);
+      }
     }
   }
+
+  if (token !== state.switchToken) return;
 
   if (!state.startedKeys.has(key)) {
     const result = await window.desk.resumeSession({
@@ -2117,12 +2150,19 @@ async function answerPermission(decision) {
   if (!entry) return;
   state.currentPermission = null;
   els.permModal.hidden = true;
-  await window.desk.respondPermission({ key: entry.key, id: entry.request.id, decision });
-  setSessionStatus(entry.key, 'working');
-  rememberActivity(entry.key, '等待模型响应…');
-  if (entry.key === state.activeKey) {
-    state.awaitingUser = false;
-    setActivity('等待模型响应…');
+  const result = await window.desk.respondPermission({
+    key: entry.key,
+    id: entry.request.id,
+    decision,
+  });
+  state.awaitingUser = false;
+  if (!result?.ok) {
+    setSessionStatus(entry.key, null);
+    showError(result?.error || '响应权限请求失败');
+  } else {
+    setSessionStatus(entry.key, 'working');
+    rememberActivity(entry.key, '等待模型响应…');
+    if (entry.key === state.activeKey) setActivity('等待模型响应…');
   }
   pumpPermission();
 }
@@ -2270,20 +2310,22 @@ async function submitQuestion() {
   state.currentQuestion = null;
   els.questionModal.hidden = true;
 
-  if (Object.keys(answers).length > 0) {
-    await window.desk.respondQuestion({ key, id: request.id, answers });
+  const result =
+    Object.keys(answers).length > 0
+      ? await window.desk.respondQuestion({ key, id: request.id, answers })
+      : await window.desk.respondQuestion({
+          key,
+          id: request.id,
+          response: '用户没有做出选择，请自行判断后继续。',
+        });
+  state.awaitingUser = false;
+  if (!result?.ok) {
+    setSessionStatus(key, null);
+    showError(result?.error || '提交回答失败');
   } else {
-    await window.desk.respondQuestion({
-      key,
-      id: request.id,
-      response: '用户没有做出选择，请自行判断后继续。',
-    });
-  }
-  setSessionStatus(key, 'working');
-  rememberActivity(key, '等待模型响应…');
-  if (key === state.activeKey) {
-    state.awaitingUser = false;
-    setActivity('等待模型响应…');
+    setSessionStatus(key, 'working');
+    rememberActivity(key, '等待模型响应…');
+    if (key === state.activeKey) setActivity('等待模型响应…');
   }
   pumpQuestions();
 }
@@ -2294,16 +2336,19 @@ async function skipQuestion() {
   const key = request.__key;
   state.currentQuestion = null;
   els.questionModal.hidden = true;
-  await window.desk.respondQuestion({
+  const result = await window.desk.respondQuestion({
     key,
     id: request.id,
     response: '用户跳过了这些问题，请自行判断后继续。',
   });
-  setSessionStatus(key, 'working');
-  rememberActivity(key, '等待模型响应…');
-  if (key === state.activeKey) {
-    state.awaitingUser = false;
-    setActivity('等待模型响应…');
+  state.awaitingUser = false;
+  if (!result?.ok) {
+    setSessionStatus(key, null);
+    showError(result?.error || '提交回答失败');
+  } else {
+    setSessionStatus(key, 'working');
+    rememberActivity(key, '等待模型响应…');
+    if (key === state.activeKey) setActivity('等待模型响应…');
   }
   pumpQuestions();
 }
@@ -2354,21 +2399,25 @@ async function respondPlan(decision) {
     window.desk.saveSettings({ permissionMode: 'default' });
   }
 
-  await window.desk.respondPlan({
+  const result = await window.desk.respondPlan({
     key,
     id: request.id,
     decision,
     feedback: decision === 'reject' ? feedback : undefined,
   });
+  state.awaitingUser = false;
+  if (!result?.ok) {
+    setSessionStatus(key, null);
+    showError(result?.error || '提交计划审批失败');
+    pumpPlans();
+    return;
+  }
   if (decision === 'approve' && state.sessionActive) {
     window.desk.setPermissionMode({ key, mode: 'default' });
   }
   setSessionStatus(key, 'working');
   rememberActivity(key, '等待模型响应…');
-  if (key === state.activeKey) {
-    state.awaitingUser = false;
-    setActivity('等待模型响应…');
-  }
+  if (key === state.activeKey) setActivity('等待模型响应…');
   pumpPlans();
 }
 
@@ -2706,6 +2755,7 @@ async function ensureSession() {
 
   const key = state.activeKey || state.sessionId || newSessionKey();
   state.activeKey = key;
+  state.closedKeys.delete(key);
   if (!state.keyTitles.get(key)) {
     state.keyTitles.set(key, els.sessionTitle.textContent || '当前会话');
   }
@@ -2756,6 +2806,7 @@ async function sendMessage() {
     const result = await window.desk.send(text, { key: state.activeKey, steer, content });
     if (!result?.ok) {
       setRunning(false);
+      setSessionStatus(state.activeKey, null);
       finishActivity('发送失败', 'error');
       showError(result?.error || '发送失败');
     } else if (result.uuid) {

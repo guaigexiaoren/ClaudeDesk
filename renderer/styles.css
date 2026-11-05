@@ -371,6 +371,14 @@ select:hover {
   background: var(--red);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .session-status.working,
+  .session-status.waiting {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 .session-item .sub {
   font-size: 11px;
   color: var(--faint);
