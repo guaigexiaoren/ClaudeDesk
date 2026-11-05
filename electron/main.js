@@ -62,7 +62,7 @@ function createWindow() {
     y: bounds.y,
     minWidth: 960,
     minHeight: 640,
-    show: false,
+    show: !IS_SMOKE,
     backgroundColor: '#16181d',
     title: 'ClaudeDesk',
     icon: path.join(__dirname, '..', 'build', 'icon.png'),

@@ -1,9 +1,6 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import hljs from 'highlight.js/lib/common';
 import 'highlight.js/styles/github-dark.css';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { buildSessionGroups } from './session-groups.js';
 import { formatDuration } from './format.js';
@@ -241,19 +238,55 @@ const els = {
 
 /* ---------------- 工具函数 ---------------- */
 
+const scriptLoads = new Map();
+
+/** 按需加载拆分的本地脚本（终端、代码高亮），避免首屏解析大依赖。 */
+function loadScriptOnce(src, globalName) {
+  if (window[globalName]) return Promise.resolve(window[globalName]);
+  if (scriptLoads.has(src)) return scriptLoads.get(src);
+
+  const promise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.onload = () => {
+      if (window[globalName]) resolve(window[globalName]);
+      else reject(new Error(`${src} 未初始化`));
+    };
+    script.onerror = () => reject(new Error(`${src} 加载失败`));
+    document.head.appendChild(script);
+  }).finally(() => scriptLoads.delete(src));
+
+  scriptLoads.set(src, promise);
+  return promise;
+}
+
 function renderMarkdown(text) {
   const html = marked.parse(text ?? '');
   return DOMPurify.sanitize(html);
 }
 
 function highlightCode(root) {
-  root.querySelectorAll('pre code').forEach((block) => {
-    try {
-      hljs.highlightElement(block);
-    } catch {
-      /* 忽略未知语言 */
-    }
-  });
+  const blocks = root.querySelectorAll('pre code');
+  if (blocks.length === 0) return;
+
+  const apply = (hljs) => {
+    blocks.forEach((block) => {
+      try {
+        hljs.highlightElement(block);
+      } catch {
+        /* 忽略未知语言 */
+      }
+    });
+  };
+
+  if (window.__ClaudeDeskHljs) {
+    apply(window.__ClaudeDeskHljs);
+    return;
+  }
+  loadScriptOnce('highlight.bundle.js', '__ClaudeDeskHljs')
+    .then(apply)
+    .catch(() => {});
 }
 
 function relativeTime(ts) {
@@ -2749,63 +2782,80 @@ function readClipboard() {
     .catch(() => '');
 }
 
+let terminalCreating = null;
+
 function ensureTerminal() {
-  if (state.terminal) return;
+  if (state.terminal) return Promise.resolve();
+  if (terminalCreating) return terminalCreating;
 
-  const term = new Terminal({
-    cursorBlink: true,
-    fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
-    fontSize: 12.5,
-    lineHeight: 1.2,
-    scrollback: 5000,
-    theme: {
-      background: '#0d0f13',
-      foreground: '#d6d9de',
-      cursor: '#d97757',
-      selectionBackground: '#2f353f',
-    },
-  });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-  term.open(els.terminalView);
-
-  term.onData((data) => window.desk.ptyWrite(data));
-  term.onResize(({ cols, rows }) => window.desk.ptyResize({ cols, rows }));
-  term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
-    if (event.code === 'KeyC') {
-      writeClipboard(term.getSelection());
-      return false;
-    }
-    if (event.code === 'KeyV') {
-      readClipboard().then((text) => {
-        if (text) window.desk.ptyWrite(text);
-      });
-      return false;
-    }
-    return true;
-  });
-
-  state.terminal = term;
-  state.terminalFit = fit;
-
-  const resize = () => {
-    if (els.terminalPanel.hidden) return;
+  terminalCreating = (async () => {
     try {
-      fit.fit();
-    } catch {
-      // 面板尺寸为 0 时 fit 会失败，忽略
+      const xterm = await loadScriptOnce('xterm.bundle.js', '__ClaudeDeskXterm');
+      if (state.terminal) return;
+
+      const term = new xterm.Terminal({
+        cursorBlink: true,
+        fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
+        fontSize: 12.5,
+        lineHeight: 1.2,
+        scrollback: 5000,
+        theme: {
+          background: '#0d0f13',
+          foreground: '#d6d9de',
+          cursor: '#d97757',
+          selectionBackground: '#2f353f',
+        },
+      });
+      const fit = new xterm.FitAddon();
+      term.loadAddon(fit);
+      term.open(els.terminalView);
+
+      term.onData((data) => window.desk.ptyWrite(data));
+      term.onResize(({ cols, rows }) => window.desk.ptyResize({ cols, rows }));
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
+        if (event.code === 'KeyC') {
+          writeClipboard(term.getSelection());
+          return false;
+        }
+        if (event.code === 'KeyV') {
+          readClipboard().then((text) => {
+            if (text) window.desk.ptyWrite(text);
+          });
+          return false;
+        }
+        return true;
+      });
+
+      state.terminal = term;
+      state.terminalFit = fit;
+
+      const resize = () => {
+        if (els.terminalPanel.hidden) return;
+        try {
+          fit.fit();
+        } catch {
+          // 面板尺寸为 0 时 fit 会失败，忽略
+        }
+      };
+      new ResizeObserver(resize).observe(els.terminalView);
+      window.addEventListener('resize', resize);
+    } catch (err) {
+      console.error('终端组件加载失败:', err);
+    } finally {
+      terminalCreating = null;
     }
-  };
-  new ResizeObserver(resize).observe(els.terminalView);
-  window.addEventListener('resize', resize);
+  })();
+
+  return terminalCreating;
 }
 
 async function startTerminal() {
   if (state.terminalStarting || state.terminalStarted) return;
   state.terminalStarting = true;
   try {
-    ensureTerminal();
+    await ensureTerminal();
+    if (!state.terminal) return;
     await new Promise((resolve) => requestAnimationFrame(resolve));
     try {
       state.terminalFit?.fit();
@@ -2844,14 +2894,15 @@ async function restartTerminal() {
   await startTerminal();
 }
 
-function toggleTerminal(force) {
+async function toggleTerminal(force) {
   const open = force ?? !state.terminalOpen;
   state.terminalOpen = open;
   els.terminalPanel.hidden = !open;
   els.toggleTerminal.classList.toggle('active', open);
   if (!open) return;
 
-  ensureTerminal();
+  await ensureTerminal();
+  if (!state.terminal) return;
   updateTerminalCwd();
   requestAnimationFrame(() => {
     try {
@@ -3011,7 +3062,13 @@ async function init() {
     if (!state.cwd) {
       setCwd(initial.defaultCwd || '', false);
     }
-    refreshSessions();
+    // 会话列表需要 import SDK 并扫描磁盘，放到首帧之后再加载
+    const refresh = () => refreshSessions();
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(refresh, { timeout: 1500 });
+    } else {
+      setTimeout(refresh, 50);
+    }
   }
 
   els.send.addEventListener('click', sendMessage);

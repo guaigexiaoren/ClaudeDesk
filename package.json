@@ -7,18 +7,24 @@
   "author": "YYMY",
   "license": "MIT",
   "scripts": {
-    "build:renderer": "esbuild renderer/app.js --bundle --outfile=renderer/bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning",
+    "build:renderer": "esbuild renderer/app.js --bundle --minify --outfile=renderer/bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning && esbuild renderer/xterm-entry.js --bundle --minify --outfile=renderer/xterm.bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning && esbuild renderer/highlight-entry.js --bundle --minify --outfile=renderer/highlight.bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning",
     "prestart": "npm run build:renderer",
     "start": "electron .",
     "test": "node --test",
     "pack": "npm run build:renderer && electron-builder --dir",
-    "dist": "npm run build:renderer && electron-builder --win portable",
+    "dist": "npm run build:renderer && electron-builder --win portable zip",
+    "dist:zip": "npm run build:renderer && electron-builder --win zip",
+    "dist:portable": "npm run build:renderer && electron-builder --win portable",
     "dist:mac": "npm run build:renderer && electron-builder --mac dmg zip"
   },
   "build": {
     "appId": "com.yymy.claudedesk",
     "productName": "ClaudeDesk",
     "npmRebuild": false,
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "directories": {
       "output": "release"
     },
@@ -30,11 +36,14 @@
       "node_modules/@anthropic-ai/**/*",
       "node_modules/@modelcontextprotocol/**/*",
       "node_modules/zod/**/*",
-      "node_modules/marked/**/*",
-      "node_modules/dompurify/**/*",
-      "node_modules/highlight.js/**/*",
-      "node_modules/diff/**/*",
-      "node_modules/node-pty/**/*"
+      "node_modules/node-pty/**/*",
+      "!node_modules/node-pty/prebuilds/win32-arm64/**/*",
+      "!node_modules/node-pty/prebuilds/darwin-x64/**/*",
+      "!node_modules/node-pty/prebuilds/darwin-arm64/**/*",
+      "!node_modules/marked/**/*",
+      "!node_modules/dompurify/**/*",
+      "!node_modules/highlight.js/**/*",
+      "!node_modules/diff/**/*"
     ],
     "asarUnpack": [
       "node_modules/@anthropic-ai/**/*",
@@ -42,7 +51,8 @@
     ],
     "win": {
       "target": [
-        "portable"
+        "portable",
+        "zip"
       ],
       "icon": "build/icon.png"
     },
