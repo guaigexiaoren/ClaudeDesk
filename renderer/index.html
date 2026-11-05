@@ -19,9 +19,22 @@
           <div class="section-title">
             <span>会话</span>
             <span class="section-actions">
+              <button id="multi-toggle" class="icon-button" title="批量选择会话">多选</button>
               <button id="add-directory" class="icon-button" title="添加工作目录">＋目录</button>
               <button id="refresh-sessions" class="icon-button" title="刷新">⟳</button>
             </span>
+          </div>
+          <input
+            id="session-search"
+            class="session-search"
+            type="search"
+            placeholder="搜索会话…"
+            spellcheck="false"
+          />
+          <div id="batch-bar" class="batch-bar" hidden>
+            <span id="batch-count">已选 0 个</span>
+            <button id="batch-trash">移入回收站</button>
+            <button id="batch-cancel">取消</button>
           </div>
           <div id="session-list" class="session-list">
             <div class="empty-hint">还没有会话</div>
@@ -50,6 +63,9 @@
             <span id="session-meta" class="meta"></span>
           </div>
           <div class="topbar-right">
+            <button id="toggle-terminal" class="ghost-button terminal-toggle" title="打开/关闭终端面板">
+              终端
+            </button>
             <label class="control">
               <span>权限</span>
               <select id="mode-select">
@@ -62,6 +78,14 @@
           </div>
         </header>
 
+        <div id="find-bar" class="find-bar" hidden>
+          <input id="find-input" type="text" placeholder="在当前页面查找…" spellcheck="false" />
+          <span id="find-count" class="find-count">0/0</span>
+          <button id="find-prev" class="icon-button" title="上一个（Shift+Enter）">↑</button>
+          <button id="find-next" class="icon-button" title="下一个（Enter）">↓</button>
+          <button id="find-close" class="icon-button" title="关闭（Esc）">×</button>
+        </div>
+
         <div id="messages" class="messages">
           <div class="welcome">
             <div class="welcome-mark">✳</div>
@@ -71,9 +95,24 @@
               <span>Enter 发送</span>
               <span>Shift + Enter 换行</span>
               <span>Esc 停止生成</span>
+              <span>Ctrl / Cmd + F 查找</span>
+              <span>Ctrl / Cmd + Alt + Space 快速提问</span>
             </div>
           </div>
         </div>
+
+        <section id="terminal-panel" class="terminal-panel" hidden>
+          <div class="terminal-head">
+            <span class="terminal-title">终端</span>
+            <span id="terminal-cwd" class="terminal-cwd"></span>
+            <span class="terminal-actions">
+              <button id="terminal-restart" class="icon-button" title="重启终端">重启</button>
+              <button id="terminal-clear" class="icon-button" title="清空屏幕">清空</button>
+              <button id="terminal-close" class="icon-button" title="关闭终端">×</button>
+            </span>
+          </div>
+          <div id="terminal-view" class="terminal-view"></div>
+        </section>
 
         <div id="composer" class="composer">
           <div id="error-bar" class="error-bar" hidden></div>

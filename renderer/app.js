@@ -2,6 +2,9 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/common';
 import 'highlight.js/styles/github-dark.css';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import { buildSessionGroups } from './session-groups.js';
 import { formatDuration } from './format.js';
 
@@ -119,6 +122,19 @@ const state = {
   slashIndex: 0,
   mcpStatus: {},
   lastUserText: '',
+  searchQuery: '',
+  selectMode: false,
+  selectedSessions: new Set(),
+  terminalOpen: false,
+  terminalCwd: '',
+  terminal: null,
+  terminalFit: null,
+  terminalStarted: false,
+  terminalStarting: false,
+  terminalRestarting: false,
+  findQuery: '',
+  findMatches: [],
+  findIndex: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -165,6 +181,25 @@ const els = {
   settingsVersion: $('settings-version'),
   mcpList: $('mcp-list'),
   mcpRefresh: $('mcp-refresh'),
+  sessionSearch: $('session-search'),
+  multiToggle: $('multi-toggle'),
+  batchBar: $('batch-bar'),
+  batchCount: $('batch-count'),
+  batchTrash: $('batch-trash'),
+  batchCancel: $('batch-cancel'),
+  findBar: $('find-bar'),
+  findInput: $('find-input'),
+  findCount: $('find-count'),
+  findPrev: $('find-prev'),
+  findNext: $('find-next'),
+  findClose: $('find-close'),
+  toggleTerminal: $('toggle-terminal'),
+  terminalPanel: $('terminal-panel'),
+  terminalCwd: $('terminal-cwd'),
+  terminalView: $('terminal-view'),
+  terminalRestart: $('terminal-restart'),
+  terminalClear: $('terminal-clear'),
+  terminalClose: $('terminal-close'),
 };
 
 /* ---------------- 工具函数 ---------------- */
@@ -226,16 +261,16 @@ function removeWelcome() {
   if (welcome) welcome.remove();
 }
 
-function appendEl(el) {
+function appendEl(el, force = false) {
   removeWelcome();
   els.messages.appendChild(el);
-  scrollToBottom();
+  scrollToBottom(force);
   return el;
 }
 
 /* ---------------- 消息渲染 ---------------- */
 
-function appendUserMessage(text, steer = false) {
+function appendUserMessage(text, steer = false, uuid = '') {
   const wrap = document.createElement('div');
   wrap.className = 'msg user';
   const bubble = document.createElement('div');
@@ -248,7 +283,82 @@ function appendUserMessage(text, steer = false) {
     bubble.appendChild(badge);
   }
   wrap.appendChild(bubble);
-  appendEl(wrap);
+  if (uuid) addMessageActions(wrap, uuid);
+  appendEl(wrap, true);
+  return wrap;
+}
+
+function addMessageActions(wrap, uuid) {
+  if (!uuid || wrap.querySelector('.msg-actions')) return;
+  const actions = document.createElement('span');
+  actions.className = 'msg-actions';
+
+  const fork = document.createElement('button');
+  fork.textContent = '分叉';
+  fork.title = '从这条消息分叉出一个新会话';
+  fork.addEventListener('click', () => forkFromMessage(uuid));
+
+  const rewind = document.createElement('button');
+  rewind.textContent = '回滚文件';
+  rewind.title = '把文件恢复到这条消息时的状态';
+  rewind.addEventListener('click', () => rewindFilesTo(uuid));
+
+  actions.append(fork, rewind);
+  wrap.prepend(actions);
+}
+
+async function forkFromMessage(uuid) {
+  if (!state.sessionId) return;
+  if (state.running || state.sending) {
+    showError('请先停止当前回合再分叉');
+    return;
+  }
+  if (!window.confirm('从这条消息分叉出一个新会话？原会话不会改变。')) return;
+
+  const base = els.sessionTitle.textContent.trim() || 'Claude 会话';
+  const title = `${base}（分叉）`;
+  const result = await window.desk.forkSession({
+    sessionId: state.sessionId,
+    dir: state.cwd,
+    upToMessageId: uuid,
+    title,
+  });
+  if (!result?.ok) {
+    showError(result?.error || '分叉失败');
+    return;
+  }
+
+  await refreshSessions();
+  await resumeSession({
+    sessionId: result.sessionId,
+    cwd: state.cwd,
+    title,
+    lastModified: Date.now(),
+  });
+}
+
+async function rewindFilesTo(uuid) {
+  if (state.running || state.sending) {
+    showError('请先停止当前回合再回滚');
+    return;
+  }
+  if (!window.confirm('把文件恢复到这条消息时的状态？对话记录不会被删除。')) return;
+
+  const result = await window.desk.rewindFiles({ userMessageId: uuid });
+  if (!result?.ok) {
+    showError(result?.error || '回滚失败');
+    return;
+  }
+
+  const info = result.result || {};
+  if (!info.canRewind) {
+    showError(info.error || '这个会话没有可用于回滚的文件快照');
+    return;
+  }
+  const files = Array.isArray(info.filesChanged) ? info.filesChanged.length : 0;
+  appendNotice(
+    `已回滚文件：${files} 个（+${info.insertions ?? 0} / -${info.deletions ?? 0}）`
+  );
 }
 
 function clearInsertBadges() {
@@ -416,6 +526,16 @@ function finishStreaming(text) {
   return true;
 }
 
+function finalizeStream() {
+  if (!state.streamEl) return;
+  if (state.streamEl.textContent) {
+    finishStreaming(state.streamEl.textContent);
+  } else {
+    state.streamEl.parentElement?.remove();
+    state.streamEl = null;
+  }
+}
+
 /* ---------------- SDK 消息 ---------------- */
 
 function handleAssistant(message) {
@@ -463,6 +583,7 @@ function handleUser(message) {
 }
 
 function handleResult(message) {
+  finalizeStream();
   clearInsertBadges();
   const interrupted = /interrupt|aborted/i.test(
     [message.result, ...(Array.isArray(message.errors) ? message.errors : [])].filter(Boolean).join(' ')
@@ -476,6 +597,11 @@ function handleResult(message) {
   }
   appendStats(message);
   setRunning(false);
+
+  // 新会话的第一轮结束后它才会出现在历史列表里，这里补一次刷新
+  if (state.sessionId && !state.sessions.some((item) => item.sessionId === state.sessionId)) {
+    refreshSessions();
+  }
 }
 
 function handleSystem(message) {
@@ -556,6 +682,10 @@ function clearError() {
 function setCwd(dir, persist = true) {
   state.cwd = dir || '';
   els.settingsCwd.textContent = dir || '未选择';
+  if (!state.terminalStarted) {
+    state.terminalCwd = state.cwd;
+    updateTerminalCwd();
+  }
   if (persist) {
     window.desk.saveSettings({ cwd: dir });
     refreshSessions();
@@ -603,16 +733,15 @@ function resetConversation() {
         <span>Enter 发送</span>
         <span>Shift + Enter 换行</span>
         <span>Esc 停止生成</span>
+        <span>Ctrl / Cmd + F 查找</span>
+        <span>Ctrl / Cmd + Alt + Space 快速提问</span>
       </div>
     </div>`;
   state.streamEl = null;
   state.toolCards.clear();
   state.sessionId = null;
   state.sessionActive = false;
-  state.currentQuestion = null;
-  state.currentPlan = null;
-  els.questionModal.hidden = true;
-  els.planModal.hidden = true;
+  clearPrompts();
   hideSlashPalette();
   updateSessionTitle('');
   els.sessionMeta.textContent = '';
@@ -625,19 +754,31 @@ function resetConversation() {
 async function refreshSessions() {
   const result = await window.desk.listSessions({});
   if (!result?.ok) return;
-  state.sessions = result.sessions || [];
+  const titles = state.settings.sessionTitles || {};
+  state.sessions = (result.sessions || []).map((session) => ({
+    ...session,
+    title: titles[session.sessionId] || session.title,
+  }));
   renderSessionGroups();
   renderTrash();
+
+  const current = state.sessions.find((session) => session.sessionId === state.sessionId);
+  if (current?.title && !els.sessionTitle.dataset.custom) {
+    els.sessionTitle.textContent = current.title;
+  }
 }
 
 function renderSessionGroups() {
-  const groups = buildSessionGroups(state.sessions, state.settings.trash || [], state.cwd);
+  const groups = buildSessionGroups(state.sessions, state.settings.trash || [], state.cwd, {
+    pinned: state.settings.pinned || [],
+    query: state.searchQuery,
+  });
   els.sessionList.innerHTML = '';
 
   if (groups.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'empty-hint';
-    hint.textContent = '还没有会话';
+    hint.textContent = state.searchQuery ? '没有匹配的会话' : '还没有会话';
     els.sessionList.appendChild(hint);
     return;
   }
@@ -648,23 +789,28 @@ function renderSessionGroups() {
 
     const header = document.createElement('div');
     header.className = 'group-header';
-    header.title = group.dir;
+    header.title = group.dir || '置顶的会话';
 
     const name = document.createElement('span');
     name.className = 'group-name';
     name.textContent = group.name;
 
-    const add = document.createElement('button');
-    add.className = 'icon-button';
-    add.textContent = '＋';
-    add.title = '在此目录新建会话';
-    add.addEventListener('click', () => createSessionInDir(group.dir));
+    header.append(name);
 
-    header.append(name, add);
-    header.addEventListener('contextmenu', (event) => {
-      event.preventDefault();
-      moveGroupToTrash(group);
-    });
+    if (!group.pinned) {
+      const add = document.createElement('button');
+      add.className = 'icon-button';
+      add.textContent = '＋';
+      add.title = '在此目录新建会话';
+      add.addEventListener('click', () => createSessionInDir(group.dir));
+      header.appendChild(add);
+
+      header.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        moveGroupToTrash(group);
+      });
+    }
+
     groupEl.appendChild(header);
 
     if (group.sessions.length === 0) {
@@ -687,6 +833,17 @@ function renderSessionItem(session) {
   item.className = 'session-item';
   item.dataset.sessionId = session.sessionId;
   if (session.sessionId === state.sessionId) item.classList.add('active');
+  if (state.selectMode) item.classList.add('selecting');
+
+  if (state.selectMode) {
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'session-select';
+    checkbox.checked = state.selectedSessions.has(session.sessionId);
+    checkbox.addEventListener('click', (event) => event.stopPropagation());
+    checkbox.addEventListener('change', () => toggleSelected(session.sessionId));
+    item.appendChild(checkbox);
+  }
 
   const main = document.createElement('button');
   main.className = 'session-main';
@@ -700,7 +857,47 @@ function renderSessionItem(session) {
   sub.textContent = [relativeTime(session.lastModified), session.gitBranch].filter(Boolean).join(' · ');
 
   main.append(title, sub);
-  main.addEventListener('click', () => resumeSession(session));
+  main.addEventListener('click', () => {
+    if (state.selectMode) {
+      toggleSelected(session.sessionId);
+      renderSessionGroups();
+      return;
+    }
+    resumeSession(session);
+  });
+
+  item.appendChild(main);
+
+  if (state.selectMode) return item;
+
+  const pinned = (state.settings.pinned || []).includes(session.sessionId);
+
+  const pin = document.createElement('button');
+  pin.className = `session-action${pinned ? ' pinned' : ''}`;
+  pin.textContent = pinned ? '★' : '☆';
+  pin.title = pinned ? '取消置顶' : '置顶会话';
+  pin.addEventListener('click', (event) => {
+    event.stopPropagation();
+    togglePin(session);
+  });
+
+  const rename = document.createElement('button');
+  rename.className = 'session-action';
+  rename.textContent = '✎';
+  rename.title = '重命名会话';
+  rename.addEventListener('click', (event) => {
+    event.stopPropagation();
+    startRename(session, item);
+  });
+
+  const exportButton = document.createElement('button');
+  exportButton.className = 'session-action';
+  exportButton.textContent = '⇩';
+  exportButton.title = '导出为 Markdown';
+  exportButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    exportSession(session);
+  });
 
   const trash = document.createElement('button');
   trash.className = 'session-trash';
@@ -711,8 +908,88 @@ function renderSessionItem(session) {
     moveToTrash(session);
   });
 
-  item.append(main, trash);
+  item.append(pin, rename, exportButton, trash);
   return item;
+}
+
+function togglePin(session) {
+  const pinned = new Set(state.settings.pinned || []);
+  if (pinned.has(session.sessionId)) pinned.delete(session.sessionId);
+  else pinned.add(session.sessionId);
+  state.settings.pinned = [...pinned];
+  window.desk.saveSettings({ pinned: state.settings.pinned });
+  renderSessionGroups();
+}
+
+function startRename(session, item) {
+  const titleEl = item.querySelector('.title');
+  if (!titleEl) return;
+
+  const input = document.createElement('input');
+  input.className = 'rename-input';
+  input.value = session.title || '';
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    const value = input.value.trim();
+    if (save && value) {
+      const titles = { ...(state.settings.sessionTitles || {}) };
+      titles[session.sessionId] = value;
+      state.settings.sessionTitles = titles;
+      window.desk.saveSettings({ sessionTitles: titles });
+      session.title = value;
+      if (session.sessionId === state.sessionId) updateSessionTitle(value);
+    }
+    renderSessionGroups();
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function toggleSelected(sessionId) {
+  if (state.selectedSessions.has(sessionId)) state.selectedSessions.delete(sessionId);
+  else state.selectedSessions.add(sessionId);
+  updateBatchBar();
+}
+
+function updateBatchBar() {
+  els.batchCount.textContent = `已选 ${state.selectedSessions.size} 个`;
+  els.batchTrash.disabled = state.selectedSessions.size === 0;
+}
+
+function toggleSelectMode(force) {
+  state.selectMode = force ?? !state.selectMode;
+  state.selectedSessions.clear();
+  els.multiToggle.textContent = state.selectMode ? '完成' : '多选';
+  els.batchBar.hidden = !state.selectMode;
+  updateBatchBar();
+  renderSessionGroups();
+}
+
+function batchMoveToTrash() {
+  const sessions = state.sessions.filter((session) => state.selectedSessions.has(session.sessionId));
+  if (sessions.length === 0) return;
+  if (!window.confirm(`把选中的 ${sessions.length} 个会话移到回收站？`)) return;
+  if (!addToTrash(sessions)) return;
+  if (sessions.some((session) => session.sessionId === state.sessionId)) newSession();
+  toggleSelectMode(false);
+  renderTrash();
 }
 
 function addToTrash(sessions) {
@@ -806,6 +1083,89 @@ function renderTrash() {
   }
 }
 
+function historyToMarkdown(session, messages) {
+  const lines = [
+    `# ${session.title || 'Claude 会话'}`,
+    '',
+    `> 工作目录：${session.cwd || '未知'}`,
+    `> 导出时间：${new Date().toLocaleString('zh-CN')}`,
+    '',
+  ];
+
+  for (const item of messages) {
+    const content = item?.message?.content;
+    if (item.type === 'user') {
+      const texts =
+        typeof content === 'string'
+          ? [content]
+          : Array.isArray(content)
+            ? content.filter((block) => block.type === 'text').map((block) => block.text)
+            : [];
+      for (const text of texts) {
+        if (text && text.trim()) lines.push('## 我', '', text.trim(), '');
+      }
+    } else if (item.type === 'assistant') {
+      const blocks = Array.isArray(content) ? content : [];
+      for (const block of blocks) {
+        if (block.type === 'text' && block.text?.trim()) {
+          lines.push('## Claude', '', block.text.trim(), '');
+        } else if (block.type === 'thinking' && block.thinking?.trim()) {
+          lines.push(
+            '<details><summary>思考过程</summary>',
+            '',
+            block.thinking.trim(),
+            '',
+            '</details>',
+            ''
+          );
+        } else if (block.type === 'tool_use') {
+          lines.push(
+            `**调用工具 \`${block.name}\`**`,
+            '',
+            '```json',
+            JSON.stringify(block.input ?? {}, null, 2),
+            '```',
+            ''
+          );
+        }
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+async function exportSession(session) {
+  const result = await window.desk.getHistory({ sessionId: session.sessionId, dir: session.cwd });
+  if (!result?.ok) {
+    showError(result?.error || '读取会话失败');
+    return;
+  }
+
+  const content = historyToMarkdown(session, result.messages || []);
+  const safeName = String(session.title || 'claude-session')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .slice(0, 60);
+  const saved = await window.desk.saveText({ defaultPath: `${safeName}.md`, content });
+  if (!saved?.ok) showError(saved?.error || '导出失败');
+  else if (saved.path) appendNotice(`已导出到 ${saved.path}`);
+}
+
+function exportCurrentSession() {
+  if (!state.sessionId) {
+    showError('当前没有可导出的会话');
+    return;
+  }
+  const current = state.sessions.find((session) => session.sessionId === state.sessionId);
+  exportSession(
+    current || {
+      sessionId: state.sessionId,
+      cwd: state.cwd,
+      title: els.sessionTitle.textContent,
+    }
+  );
+}
+
 async function refreshMcp() {
   const result = await window.desk.listMcp();
   els.mcpList.innerHTML = '';
@@ -876,10 +1236,7 @@ async function resumeSession(session) {
   state.toolCards.clear();
   state.streamEl = null;
   state.sessionId = session.sessionId;
-  state.currentQuestion = null;
-  state.currentPlan = null;
-  els.questionModal.hidden = true;
-  els.planModal.hidden = true;
+  clearPrompts();
   if (dir) setCwd(dir, true);
   updateSessionTitle(session.title);
 
@@ -888,8 +1245,19 @@ async function resumeSession(session) {
     for (const item of history.messages) {
       const payload = { ...item, session_id: session.sessionId };
       if (item.type === 'user') {
-        if (typeof item.message?.content === 'string') appendUserMessage(item.message.content);
-        else handleUser(payload);
+        const content = item.message?.content;
+        if (typeof content === 'string') {
+          appendUserMessage(content, false, item.uuid);
+        } else if (Array.isArray(content)) {
+          const text = content
+            .filter((block) => block.type === 'text' && block.text)
+            .map((block) => block.text)
+            .join('\n');
+          if (text) appendUserMessage(text, false, item.uuid);
+          handleUser(payload);
+        } else {
+          handleUser(payload);
+        }
       } else if (item.type === 'assistant') {
         handleAssistant(payload);
       }
@@ -909,6 +1277,20 @@ async function resumeSession(session) {
 }
 
 /* ---------------- 权限弹窗 ---------------- */
+
+function clearPermissionUI() {
+  state.permissionQueue = [];
+  state.currentPermission = null;
+  els.permModal.hidden = true;
+}
+
+function clearPrompts() {
+  state.currentQuestion = null;
+  state.currentPlan = null;
+  els.questionModal.hidden = true;
+  els.planModal.hidden = true;
+  clearPermissionUI();
+}
 
 function enqueuePermission(request) {
   state.permissionQueue.push(request);
@@ -1182,6 +1564,246 @@ function applySlash(command) {
   autosize();
 }
 
+/* ---------------- 页内查找 ---------------- */
+
+function clearFindHighlight() {
+  if (typeof CSS !== 'undefined' && CSS.highlights) {
+    CSS.highlights.delete('find-match');
+    CSS.highlights.delete('find-active');
+  }
+  state.findMatches = [];
+  state.findIndex = 0;
+}
+
+function collectFindMatches(query) {
+  const matches = [];
+  if (!query) return matches;
+
+  const needle = query.toLowerCase();
+  const walker = document.createTreeWalker(els.messages, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const text = node.nodeValue;
+    // 跳过折叠起来的思考块、工具详情等不可见内容
+    if (text && node.parentElement && node.parentElement.getClientRects().length > 0) {
+      const haystack = text.toLowerCase();
+      let index = haystack.indexOf(needle);
+      while (index !== -1) {
+        const range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(node, index + query.length);
+        matches.push(range);
+        index = haystack.indexOf(needle, index + query.length);
+      }
+    }
+    node = walker.nextNode();
+  }
+  return matches;
+}
+
+function applyFindHighlight() {
+  if (typeof CSS === 'undefined' || !CSS.highlights || typeof Highlight !== 'function') return;
+  CSS.highlights.delete('find-match');
+  CSS.highlights.delete('find-active');
+  if (state.findMatches.length === 0) return;
+
+  CSS.highlights.set('find-match', new Highlight(...state.findMatches));
+  const active = state.findMatches[state.findIndex];
+  if (active) CSS.highlights.set('find-active', new Highlight(active));
+}
+
+function updateFindCount() {
+  const total = state.findMatches.length;
+  if (total === 0) {
+    els.findCount.textContent = els.findInput.value.trim() ? '无结果' : '0/0';
+    return;
+  }
+  els.findCount.textContent = `${state.findIndex + 1}/${total}`;
+}
+
+function scrollToFindMatch() {
+  const range = state.findMatches[state.findIndex];
+  if (!range) return;
+  const element = range.startContainer.parentElement;
+  if (element) element.scrollIntoView({ block: 'center' });
+}
+
+function runFind(forward = true, findNext = false) {
+  const query = els.findInput.value.trim();
+  if (!query) {
+    state.findQuery = '';
+    clearFindHighlight();
+    updateFindCount();
+    return;
+  }
+
+  if (!findNext || query !== state.findQuery || state.findMatches.length === 0) {
+    state.findQuery = query;
+    state.findMatches = collectFindMatches(query);
+    state.findIndex = 0;
+  } else {
+    const total = state.findMatches.length;
+    state.findIndex = (state.findIndex + (forward ? 1 : -1) + total) % total;
+  }
+
+  applyFindHighlight();
+  scrollToFindMatch();
+  updateFindCount();
+}
+
+function openFindBar() {
+  els.findBar.hidden = false;
+  els.findInput.focus();
+  els.findInput.select();
+  if (els.findInput.value.trim()) runFind(true, false);
+}
+
+function closeFindBar() {
+  els.findBar.hidden = true;
+  els.findInput.value = '';
+  state.findQuery = '';
+  clearFindHighlight();
+  els.findCount.textContent = '0/0';
+  els.input.focus();
+}
+
+/* ---------------- 终端 ---------------- */
+
+function terminalDir() {
+  return state.terminalCwd || state.cwd || '';
+}
+
+function updateTerminalCwd() {
+  els.terminalCwd.textContent = terminalDir() || '未选择目录';
+}
+
+function writeClipboard(text) {
+  if (!text) return;
+  window.desk.writeClipboard(text).catch(() => {});
+}
+
+function readClipboard() {
+  return window.desk
+    .readClipboard()
+    .then((result) => result?.text || '')
+    .catch(() => '');
+}
+
+function ensureTerminal() {
+  if (state.terminal) return;
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
+    fontSize: 12.5,
+    lineHeight: 1.2,
+    scrollback: 5000,
+    theme: {
+      background: '#0d0f13',
+      foreground: '#d6d9de',
+      cursor: '#d97757',
+      selectionBackground: '#2f353f',
+    },
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(els.terminalView);
+
+  term.onData((data) => window.desk.ptyWrite(data));
+  term.onResize(({ cols, rows }) => window.desk.ptyResize({ cols, rows }));
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
+    if (event.code === 'KeyC') {
+      writeClipboard(term.getSelection());
+      return false;
+    }
+    if (event.code === 'KeyV') {
+      readClipboard().then((text) => {
+        if (text) window.desk.ptyWrite(text);
+      });
+      return false;
+    }
+    return true;
+  });
+
+  state.terminal = term;
+  state.terminalFit = fit;
+
+  const resize = () => {
+    if (els.terminalPanel.hidden) return;
+    try {
+      fit.fit();
+    } catch {
+      // 面板尺寸为 0 时 fit 会失败，忽略
+    }
+  };
+  new ResizeObserver(resize).observe(els.terminalView);
+  window.addEventListener('resize', resize);
+}
+
+async function startTerminal() {
+  if (state.terminalStarting || state.terminalStarted) return;
+  state.terminalStarting = true;
+  try {
+    ensureTerminal();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    try {
+      state.terminalFit?.fit();
+    } catch {
+      // 忽略尺寸计算失败
+    }
+
+    const result = await window.desk.ptyStart({
+      cwd: state.cwd,
+      cols: state.terminal.cols,
+      rows: state.terminal.rows,
+    });
+    if (!result?.ok) {
+      state.terminal.writeln(`\r\n[无法启动终端] ${result?.error || '未知错误'}\r\n`);
+      return;
+    }
+    state.terminalStarted = true;
+    state.terminalCwd = result.cwd || state.cwd;
+    updateTerminalCwd();
+    state.terminal.focus();
+  } finally {
+    state.terminalStarting = false;
+  }
+}
+
+async function restartTerminal() {
+  if (state.terminalStarting) return;
+  state.terminalRestarting = true;
+  await window.desk.ptyStop();
+  state.terminal?.reset();
+  state.terminalStarted = false;
+  state.terminalCwd = state.cwd;
+  updateTerminalCwd();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  state.terminalRestarting = false;
+  await startTerminal();
+}
+
+function toggleTerminal(force) {
+  const open = force ?? !state.terminalOpen;
+  state.terminalOpen = open;
+  els.terminalPanel.hidden = !open;
+  els.toggleTerminal.classList.toggle('active', open);
+  if (!open) return;
+
+  ensureTerminal();
+  updateTerminalCwd();
+  requestAnimationFrame(() => {
+    try {
+      state.terminalFit?.fit();
+    } catch {
+      // 忽略
+    }
+    if (!state.terminalStarted) startTerminal();
+    else state.terminal?.focus();
+  });
+}
+
 /* ---------------- 发送 ---------------- */
 
 function autosize() {
@@ -1225,7 +1847,7 @@ async function sendMessage() {
     const ready = await ensureSession();
     if (!ready) return;
 
-    appendUserMessage(text, steer);
+    const bubble = appendUserMessage(text, steer);
     els.input.value = '';
     autosize();
     hideSlashPalette();
@@ -1235,6 +1857,8 @@ async function sendMessage() {
     if (!result?.ok) {
       setRunning(false);
       showError(result?.error || '发送失败');
+    } else if (result.uuid) {
+      addMessageActions(bubble, result.uuid);
     }
   } finally {
     state.sending = false;
@@ -1281,6 +1905,35 @@ async function init() {
   $('new-session').addEventListener('click', newSession);
   $('refresh-sessions').addEventListener('click', refreshSessions);
   els.addDirectory.addEventListener('click', pickDirectoryAndOpen);
+  els.sessionSearch.addEventListener('input', () => {
+    state.searchQuery = els.sessionSearch.value.trim();
+    renderSessionGroups();
+  });
+  els.multiToggle.addEventListener('click', () => toggleSelectMode());
+  els.batchTrash.addEventListener('click', batchMoveToTrash);
+  els.batchCancel.addEventListener('click', () => toggleSelectMode(false));
+  updateBatchBar();
+
+  els.toggleTerminal.addEventListener('click', () => toggleTerminal());
+  els.terminalClose.addEventListener('click', () => toggleTerminal(false));
+  els.terminalClear.addEventListener('click', () => state.terminal?.clear());
+  els.terminalRestart.addEventListener('click', restartTerminal);
+
+  els.findInput.addEventListener('input', () => runFind(true, false));
+  els.findInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      runFind(!event.shiftKey, true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFindBar();
+    }
+  });
+  els.findNext.addEventListener('click', () => runFind(true, true));
+  els.findPrev.addEventListener('click', () => runFind(false, true));
+  els.findClose.addEventListener('click', closeFindBar);
   els.trashToggle.addEventListener('click', () => {
     els.trashList.hidden = !els.trashList.hidden;
     els.trashArrow.textContent = els.trashList.hidden ? '▸' : '▾';
@@ -1320,8 +1973,18 @@ async function init() {
   });
 
   document.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'f') {
+      event.preventDefault();
+      openFindBar();
+      return;
+    }
     if (event.key !== 'Escape') return;
-    if (!els.slashPalette.hidden) {
+    if (els.terminalPanel.contains(event.target)) return;
+    if (!els.findBar.hidden) {
+      closeFindBar();
+    } else if (!els.settingsModal.hidden) {
+      els.settingsModal.hidden = true;
+    } else if (!els.slashPalette.hidden) {
       hideSlashPalette();
     } else if (!els.questionModal.hidden) {
       skipQuestion();
@@ -1396,15 +2059,35 @@ async function init() {
     if (payload.status === 'running') setRunning(true);
     if (payload.status === 'idle') setRunning(false);
     if (payload.sessionId) state.sessionId = payload.sessionId;
-    if (payload.ended) state.sessionActive = false;
+    if (payload.ended) {
+      state.sessionActive = false;
+      clearPrompts();
+    }
     if (payload.cwd && payload.cwd !== state.cwd) setCwd(payload.cwd, false);
   });
   window.desk.onPermission(enqueuePermission);
   window.desk.onQuestion(showQuestion);
   window.desk.onPlan(showPlan);
   window.desk.onCommands(handleCommands);
+  window.desk.onPtyData(({ data }) => state.terminal?.write(data));
+  window.desk.onPtyExit((info) => {
+    state.terminalStarted = false;
+    if (state.terminalRestarting || els.terminalPanel.hidden) return;
+    const code = info?.exitCode === null || info?.exitCode === undefined ? '未知' : info.exitCode;
+    state.terminal?.writeln(`\r\n[终端已退出，退出码 ${code}]`);
+  });
+  window.desk.onQuickSend(({ text }) => {
+    if (!text) return;
+    els.input.value = text;
+    autosize();
+    if (!state.sending) sendMessage();
+  });
+  window.desk.onMenuExport(exportCurrentSession);
+  window.desk.onMenuFind(openFindBar);
   window.desk.onError((payload) => {
+    finalizeStream();
     clearInsertBadges();
+    clearPrompts();
     setRunning(false);
     showError(payload?.message || '会话出错');
   });

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+    />
+    <title>快速提问</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #101216;
+        color: #e6e6e6;
+        font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+        -webkit-app-region: drag;
+      }
+      .quick {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 10px;
+        padding: 20px 22px;
+        border: 1px solid #2c313a;
+        border-radius: 12px;
+        background: #16181d;
+      }
+      .quick-mark {
+        position: absolute;
+        left: 22px;
+        top: 22px;
+        color: #d97757;
+        font-size: 18px;
+      }
+      #quick-input {
+        -webkit-app-region: no-drag;
+        width: 100%;
+        padding: 11px 14px 11px 40px;
+        border: 1px solid #2c313a;
+        border-radius: 10px;
+        outline: none;
+        background: #1c1f27;
+        color: #e6e6e6;
+        font-family: inherit;
+        font-size: 15px;
+      }
+      #quick-input:focus {
+        border-color: rgba(217, 119, 87, 0.65);
+      }
+      #quick-input::placeholder {
+        color: #6b7280;
+      }
+      .quick-hint {
+        padding-left: 2px;
+        color: #6b7280;
+        font-size: 11.5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="quick">
+      <span class="quick-mark">✳</span>
+      <input
+        id="quick-input"
+        type="text"
+        placeholder="快速问 Claude…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <div class="quick-hint">Enter 发送并切到主窗口 · Esc 关闭</div>
+    </div>
+    <script src="quick.js"></script>
+  </body>
+</html>

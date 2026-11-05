@@ -16,11 +16,26 @@ contextBridge.exposeInMainWorld('desk', {
   saveSettings: (patch) => ipcRenderer.invoke('app:save-settings', patch),
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
   showInFolder: (target) => ipcRenderer.invoke('shell:show-in-folder', target),
+  saveText: (options) => ipcRenderer.invoke('dialog:save-text', options),
+
+  // 终端
+  ptyStart: (options) => ipcRenderer.invoke('pty:start', options),
+  ptyWrite: (data) => ipcRenderer.invoke('pty:write', { data }),
+  ptyResize: (options) => ipcRenderer.invoke('pty:resize', options),
+  ptyStop: () => ipcRenderer.invoke('pty:stop'),
+  readClipboard: () => ipcRenderer.invoke('clipboard:read'),
+  writeClipboard: (text) => ipcRenderer.invoke('clipboard:write', { text }),
+
+  // 快速窗口
+  quickSubmit: (text) => ipcRenderer.invoke('quick:submit', { text }),
+  hideQuick: () => ipcRenderer.invoke('quick:hide'),
 
   // 会话
   listSessions: (options) => ipcRenderer.invoke('session:list', options),
   getHistory: (options) => ipcRenderer.invoke('session:history', options),
   deleteSession: (options) => ipcRenderer.invoke('session:delete', options),
+  forkSession: (options) => ipcRenderer.invoke('session:fork', options),
+  rewindFiles: (options) => ipcRenderer.invoke('session:rewind', options),
   listMcp: () => ipcRenderer.invoke('mcp:list'),
   startSession: (options) => ipcRenderer.invoke('session:start', options),
   resumeSession: (options) => ipcRenderer.invoke('session:resume', options),
@@ -44,4 +59,10 @@ contextBridge.exposeInMainWorld('desk', {
   onError: subscribe('session:error'),
   onNewSession: subscribe('menu:new-session'),
   onPickDirectory: subscribe('menu:pick-directory'),
+  onMenuExport: subscribe('menu:export'),
+  onMenuFind: subscribe('menu:find'),
+  onPtyData: subscribe('pty:data'),
+  onPtyExit: subscribe('pty:exit'),
+  onQuickFocus: subscribe('quick:focus'),
+  onQuickSend: subscribe('quick:send'),
 });

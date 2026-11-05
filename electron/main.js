@@ -2,10 +2,23 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  Tray,
+  clipboard,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  nativeImage,
+  screen,
+  shell,
+} = require('electron');
 
 const { Store } = require('./store');
 const { SessionManager } = require('./session');
+const { TerminalSession } = require('./terminal');
 
 const IS_SMOKE =
   process.argv.includes('--smoke') ||
@@ -25,8 +38,13 @@ const IS_SMOKE_BYPASS = process.argv.includes('--smoke-bypass');
 const IS_SMOKE_STEER = process.argv.includes('--smoke-steer');
 
 let mainWindow = null;
+let quickWindow = null;
+let tray = null;
 let store = null;
 let session = null;
+let terminal = null;
+let isQuitting = false;
+const QUICK_SHORTCUT = 'CommandOrControl+Alt+Space';
 
 function createWindow() {
   const settings = store.get();
@@ -130,10 +148,14 @@ function createWindow() {
     }, 2500);
   });
 
-  mainWindow.on('close', () => {
+  mainWindow.on('close', (event) => {
     if (!mainWindow) return;
     const b = mainWindow.getBounds();
     store.merge({ windowBounds: { width: b.width, height: b.height, x: b.x, y: b.y } });
+    if (!isQuitting && tray) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
   });
 
   mainWindow.on('closed', () => {
@@ -149,12 +171,117 @@ function createWindow() {
     }
     return { action: 'deny' };
   });
+
+  // 对话里的链接用系统浏览器打开，避免整个应用被导航走
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    try {
+      const { protocol } = new URL(url);
+      if (protocol === 'http:' || protocol === 'https:') shell.openExternal(url);
+    } catch {
+      // 非法 URL 直接忽略
+    }
+  });
 }
 
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+function showMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function createQuickWindow() {
+  quickWindow = new BrowserWindow({
+    width: 680,
+    height: 154,
+    frame: false,
+    resizable: false,
+    show: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    backgroundColor: '#101216',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  quickWindow.loadFile(path.join(__dirname, '..', 'renderer', 'quick.html'));
+  quickWindow.on('blur', () => {
+    if (quickWindow && !quickWindow.isDestroyed()) quickWindow.hide();
+  });
+  quickWindow.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    quickWindow.hide();
+  });
+  quickWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+}
+
+function showQuickWindow() {
+  if (!quickWindow || quickWindow.isDestroyed()) {
+    createQuickWindow();
+    quickWindow.once('ready-to-show', () => showQuickWindow());
+    return;
+  }
+  const { workArea } = screen.getPrimaryDisplay();
+  const [width] = quickWindow.getSize();
+  quickWindow.setPosition(
+    Math.round(workArea.x + (workArea.width - width) / 2),
+    Math.round(workArea.y + 140)
+  );
+  quickWindow.show();
+  quickWindow.focus();
+  quickWindow.webContents.send('quick:focus');
+}
+
+function toggleQuickWindow() {
+  if (quickWindow && !quickWindow.isDestroyed() && quickWindow.isVisible()) {
+    quickWindow.hide();
+    return;
+  }
+  showQuickWindow();
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'));
+  tray = new Tray(process.platform === 'win32' ? icon.resize({ width: 16, height: 16 }) : icon);
+  tray.setToolTip('ClaudeDesk');
+  const shortcutLabel = process.platform === 'darwin' ? 'Cmd+Alt+Space' : 'Ctrl+Alt+Space';
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示主窗口', click: showMainWindow },
+      {
+        label: `快速提问（${shortcutLabel}）`,
+        click: showQuickWindow,
+      },
+      {
+        label: '新建会话',
+        click: () => {
+          showMainWindow();
+          send('menu:new-session');
+        },
+      },
+      { type: 'separator' },
+      {
+        label: '退出 ClaudeDesk',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ])
+  );
+  tray.on('click', showMainWindow);
+  tray.on('double-click', showMainWindow);
 }
 
 async function runChatSmoke() {
@@ -675,6 +802,75 @@ function registerIpc() {
   );
 
   ipcMain.handle(
+    'dialog:save-text',
+    safe(async ({ defaultPath, content } = {}) => {
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: '导出会话',
+        defaultPath: defaultPath || 'claude-session.md',
+        filters: [
+          { name: 'Markdown', extensions: ['md'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      });
+      if (result.canceled || !result.filePath) return { ok: true, path: null };
+      fs.writeFileSync(result.filePath, String(content ?? ''), 'utf8');
+      return { ok: true, path: result.filePath };
+    })
+  );
+
+  ipcMain.handle(
+    'pty:start',
+    safe(async ({ cwd, cols, rows } = {}) =>
+      terminal.start({
+        cwd,
+        cols,
+        rows,
+        onData: (data) => send('pty:data', { data }),
+        onExit: (info) => send('pty:exit', info),
+      })
+    )
+  );
+
+  ipcMain.handle('pty:write', safe(async ({ data } = {}) => terminal.write(data)));
+  ipcMain.handle(
+    'pty:resize',
+    safe(async ({ cols, rows } = {}) => terminal.resize(cols, rows))
+  );
+  ipcMain.handle('pty:stop', safe(async () => terminal.stop()));
+
+  ipcMain.handle(
+    'clipboard:read',
+    safe(async () => ({ ok: true, text: clipboard.readText() }))
+  );
+  ipcMain.handle(
+    'clipboard:write',
+    safe(async ({ text } = {}) => {
+      clipboard.writeText(String(text ?? ''));
+      return { ok: true };
+    })
+  );
+
+  ipcMain.handle(
+    'quick:submit',
+    safe(async ({ text } = {}) => {
+      const value = String(text || '').trim();
+      if (!value) return { ok: false, error: '内容为空' };
+      quickWindow?.hide();
+      showMainWindow();
+      send('quick:send', { text: value });
+      return { ok: true };
+    })
+  );
+
+  ipcMain.handle(
+    'quick:hide',
+    safe(async () => {
+      quickWindow?.hide();
+      return { ok: true };
+    })
+  );
+
+  ipcMain.handle(
     'session:list',
     safe(async ({ dir } = {}) => {
       const { listSessions } = await import('@anthropic-ai/claude-agent-sdk');
@@ -706,6 +902,29 @@ function registerIpc() {
       const { deleteSession } = await import('@anthropic-ai/claude-agent-sdk');
       await deleteSession(sessionId, { dir: dir || undefined });
       return { ok: true };
+    })
+  );
+
+  ipcMain.handle(
+    'session:fork',
+    safe(async ({ sessionId, dir, upToMessageId, title } = {}) => {
+      if (!sessionId) return { ok: false, error: '缺少会话 ID' };
+      const { forkSession } = await import('@anthropic-ai/claude-agent-sdk');
+      const forked = await forkSession(sessionId, {
+        dir: dir || undefined,
+        upToMessageId: upToMessageId || undefined,
+        title: title || undefined,
+      });
+      return { ok: true, sessionId: forked.sessionId };
+    })
+  );
+
+  ipcMain.handle(
+    'session:rewind',
+    safe(async ({ userMessageId, dryRun } = {}) => {
+      if (!userMessageId) return { ok: false, error: '缺少消息 ID' };
+      const result = await session.rewindFiles(userMessageId, { dryRun: Boolean(dryRun) });
+      return { ok: true, result };
     })
   );
 
@@ -833,6 +1052,11 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+O',
           click: () => send('menu:pick-directory'),
         },
+        {
+          label: '导出当前对话…',
+          accelerator: 'CmdOrCtrl+E',
+          click: () => send('menu:export'),
+        },
         { type: 'separator' },
         { role: 'quit', label: '退出' },
       ],
@@ -852,6 +1076,11 @@ function buildMenu() {
     {
       label: '视图',
       submenu: [
+        {
+          label: '页内查找',
+          accelerator: 'CmdOrCtrl+F',
+          click: () => send('menu:find'),
+        },
         { role: 'reload', label: '重新加载' },
         { role: 'toggleDevTools', label: '开发者工具' },
         { type: 'separator' },
@@ -889,26 +1118,44 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow();
   });
 
   app.whenReady().then(() => {
     app.setAppUserModelId('com.yymy.claudedesk');
     store = new Store(app.getPath('userData'));
+    terminal = new TerminalSession();
     attachSession();
     registerIpc();
     buildMenu();
     createWindow();
+
+    if (!IS_SMOKE) {
+      try {
+        createTray();
+      } catch (err) {
+        console.error('[tray] 创建托盘失败:', err);
+      }
+      globalShortcut.register(QUICK_SHORTCUT, toggleQuickWindow);
+      if (!globalShortcut.isRegistered(QUICK_SHORTCUT)) {
+        console.error('[shortcut] 快速提问快捷键注册失败，可能被其他程序占用');
+      }
+    }
+  });
+
+  app.on('activate', () => {
+    if (mainWindow) showMainWindow();
   });
 
   app.on('window-all-closed', () => {
-    app.quit();
+    // 有托盘时常驻后台；没有托盘（冒烟测试或托盘创建失败）就正常退出
+    if (!tray) app.quit();
   });
 
   app.on('before-quit', () => {
+    isQuitting = true;
+    globalShortcut.unregisterAll();
+    if (terminal) terminal.stop();
     if (session) session.close();
   });
 }

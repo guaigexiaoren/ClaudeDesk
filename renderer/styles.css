@@ -227,8 +227,99 @@ select:hover {
   flex: none;
 }
 
-.session-item:hover .session-trash {
+.session-action {
+  opacity: 0;
+  color: var(--faint);
+  font-size: 11.5px;
+  padding: 6px 5px;
+  border-radius: 6px;
+  flex: none;
+}
+
+.session-item:hover .session-trash,
+.session-item:hover .session-action {
   opacity: 1;
+}
+
+.session-action.pinned {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.session-action:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.rename-input {
+  width: 100%;
+  min-width: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 2px 6px;
+  outline: none;
+}
+
+.session-select {
+  margin-left: 8px;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.session-item.selecting .session-main {
+  padding-left: 4px;
+}
+
+.session-search {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.session-search:focus {
+  border-color: var(--accent-border);
+}
+
+.session-search::placeholder {
+  color: var(--faint);
+}
+
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.batch-bar #batch-count {
+  flex: 1;
+}
+
+.batch-bar button {
+  color: var(--accent);
+  font-size: 11.5px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.batch-bar button:hover {
+  background: var(--panel-3);
+  color: var(--text);
 }
 
 .session-trash:hover {
@@ -270,7 +361,9 @@ select:hover {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   height: 100%;
+  position: relative;
 }
 
 #topbar {
@@ -357,7 +450,6 @@ select:hover {
   flex: 1;
   overflow-y: auto;
   padding: 22px 0 8px;
-  scroll-behavior: smooth;
 }
 
 .msg {
@@ -369,7 +461,32 @@ select:hover {
 
 .msg.user {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+}
+
+.msg-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.msg.user:hover .msg-actions {
+  opacity: 1;
+}
+
+.msg-actions button {
+  color: var(--faint);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.msg-actions button:hover {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 .msg.user .bubble {
@@ -683,10 +800,131 @@ select:hover {
 .welcome-tips {
   display: flex;
   justify-content: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 6px 16px;
   margin-top: 20px;
   font-size: 11.5px;
   color: var(--faint);
+}
+
+/* ---------- 页内查找 ---------- */
+
+.find-bar {
+  position: absolute;
+  top: 54px;
+  right: 18px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.find-bar input {
+  width: 220px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 5px 8px;
+  outline: none;
+}
+
+.find-bar input:focus {
+  border-color: var(--accent-border);
+}
+
+.find-count {
+  min-width: 44px;
+  text-align: center;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+::highlight(find-match) {
+  background: rgba(250, 204, 21, 0.35);
+  color: inherit;
+}
+
+::highlight(find-active) {
+  background: #facc15;
+  color: #1a120f;
+}
+
+/* ---------- 终端面板 ---------- */
+
+.terminal-toggle {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.terminal-toggle.active {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.terminal-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  height: 320px;
+  border-top: 1px solid var(--border);
+  background: var(--code-bg);
+}
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.terminal-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.terminal-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.terminal-view {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+.terminal-view .xterm {
+  height: 100%;
+}
+
+.terminal-view .xterm-viewport {
+  background: transparent !important;
 }
 
 /* ---------- 输入区 ---------- */
@@ -972,6 +1210,10 @@ select:hover {
 .trash-section {
   flex: none;
   gap: 4px;
+}
+
+.trash-section .session-list {
+  max-height: 180px;
 }
 
 .trash-toggle {

@@ -36,3 +36,45 @@ test('当前目录没有会话时也会显示这个分组', () => {
   assert.ok(gamma, '应该包含当前目录');
   assert.equal(gamma.sessions.length, 0);
 });
+
+test('置顶会话单独成组并排在最前', () => {
+  const sessions = SESSIONS.map((session, index) => ({
+    ...session,
+    title: ['构建界面', '修复滚动', '导出功能'][index],
+  }));
+  const groups = buildSessionGroups(sessions, [], '', { pinned: ['a', 'c'] });
+
+  assert.equal(groups[0].name, '置顶');
+  assert.deepEqual(
+    groups[0].sessions.map((session) => session.sessionId),
+    ['c', 'a']
+  );
+  const alpha = groups.find((group) => group.name === 'alpha');
+  assert.deepEqual(
+    alpha.sessions.map((session) => session.sessionId),
+    ['b']
+  );
+});
+
+test('搜索按标题和目录过滤，搜索时不显示空目录', () => {
+  const sessions = SESSIONS.map((session, index) => ({
+    ...session,
+    title: ['构建界面', '修复滚动', '导出功能'][index],
+  }));
+
+  const byTitle = buildSessionGroups(sessions, [], 'C:\\work\\empty', { query: '滚动' });
+  assert.equal(byTitle.length, 1);
+  assert.deepEqual(
+    byTitle[0].sessions.map((session) => session.sessionId),
+    ['b']
+  );
+
+  const byDir = buildSessionGroups(sessions, [], '', { query: 'beta' });
+  assert.deepEqual(
+    byDir[0].sessions.map((session) => session.sessionId),
+    ['c']
+  );
+
+  const none = buildSessionGroups(sessions, [], 'C:\\work\\empty', { query: '不存在' });
+  assert.equal(none.length, 0);
+});

@@ -89,6 +89,7 @@ class SessionManager extends EventEmitter {
         cwd: this.cwd,
         permissionMode: permissionMode || 'default',
         includePartialMessages: true,
+        enableFileCheckpointing: true,
         abortController: this.controller,
         settingSources: ['user', 'project', 'local'],
         env: {
@@ -296,6 +297,11 @@ class SessionManager extends EventEmitter {
     if (!this.query) throw new Error('会话尚未启动');
     await this.query.setPermissionMode(mode);
     return { ok: true };
+  }
+
+  async rewindFiles(userMessageId, options = {}) {
+    if (!this.query) throw new Error('会话尚未启动');
+    return this.query.rewindFiles(userMessageId, options);
   }
 
   async close() {
