@@ -40,14 +40,13 @@ contextBridge.exposeInMainWorld('desk', {
   startSession: (options) => ipcRenderer.invoke('session:start', options),
   resumeSession: (options) => ipcRenderer.invoke('session:resume', options),
   send: (text, options = {}) => ipcRenderer.invoke('session:send', { text, ...options }),
-  interrupt: () => ipcRenderer.invoke('session:interrupt'),
-  setModel: (model) => ipcRenderer.invoke('session:set-model', { model }),
-  setPermissionMode: (mode) => ipcRenderer.invoke('session:set-permission-mode', { mode }),
-  closeSession: () => ipcRenderer.invoke('session:close'),
-  respondPermission: (id, decision) => ipcRenderer.invoke('permission:respond', { id, decision }),
-  respondQuestion: (id, payload) => ipcRenderer.invoke('question:respond', { id, ...payload }),
-  respondPlan: (id, decision, editedPlan, feedback) =>
-    ipcRenderer.invoke('plan:respond', { id, decision, editedPlan, feedback }),
+  interrupt: (options = {}) => ipcRenderer.invoke('session:interrupt', options),
+  setModel: (options = {}) => ipcRenderer.invoke('session:set-model', options),
+  setPermissionMode: (options = {}) => ipcRenderer.invoke('session:set-permission-mode', options),
+  closeSession: (options = {}) => ipcRenderer.invoke('session:close', options),
+  respondPermission: (payload = {}) => ipcRenderer.invoke('permission:respond', payload),
+  respondQuestion: (payload = {}) => ipcRenderer.invoke('question:respond', payload),
+  respondPlan: (payload = {}) => ipcRenderer.invoke('plan:respond', payload),
 
   // 事件
   onEvent: subscribe('session:event'),

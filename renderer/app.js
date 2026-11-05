@@ -108,6 +108,15 @@ const state = {
   permissionMode: 'default',
   sessionId: null,
   sessionActive: false,
+  // 多会话：key 是后端会话标识，sessionId 是 SDK 会话标识
+  activeKey: null,
+  startedKeys: new Set(),
+  keyToSession: new Map(),
+  sessionKeys: new Map(),
+  sessionStatus: new Map(),
+  keyTitles: new Map(),
+  commandsByKey: new Map(),
+  lastStderrByKey: new Map(),
   running: false,
   sending: false,
   streamEl: null,
@@ -118,14 +127,15 @@ const state = {
   activityLabel: '',
   lastEventAt: 0,
   awaitingUser: false,
-  switching: false,
   replaying: false,
-  lastStderr: '',
+  pendingEvents: [],
   toolCards: new Map(),
   permissionQueue: [],
   currentPermission: null,
   currentQuestion: null,
   currentPlan: null,
+  questionQueue: [],
+  planQueue: [],
   commands: [],
   terminalCommands: new Set(),
   slashItems: [],
@@ -357,7 +367,7 @@ async function rewindFilesTo(uuid) {
   }
   if (!window.confirm('把文件恢复到这条消息时的状态？对话记录不会被删除。')) return;
 
-  const result = await window.desk.rewindFiles({ userMessageId: uuid });
+  const result = await window.desk.rewindFiles({ key: state.activeKey, userMessageId: uuid });
   if (!result?.ok) {
     showError(result?.error || '回滚失败');
     return;
@@ -769,6 +779,68 @@ function handleSystem(message) {
   }
 }
 
+/** 所有会话的事件都从这里进来：后台会话只更新状态灯，不渲染到当前对话。 */
+function handleSessionEvent(key, message) {
+  if (!key || !message) return;
+  if (message.type === 'system' && message.subtype === 'init') {
+    registerSessionKey(key, message.session_id);
+  }
+  updateSessionStatusFromEvent(key, message);
+  if (key !== state.activeKey) return;
+  // 切回正在运行的会话时，历史还没画完，先排队
+  if (state.replaying) {
+    state.pendingEvents.push(message);
+    return;
+  }
+  handleEvent(message);
+}
+
+function handleSessionState(key, payload) {
+  if (payload.sessionId) registerSessionKey(key, payload.sessionId);
+
+  if (key !== state.activeKey) {
+    if (payload.ended) {
+      state.startedKeys.delete(key);
+      if (state.sessionStatus.get(key) === 'working') setSessionStatus(key, 'error');
+    }
+    return;
+  }
+
+  const wasRunning = state.running;
+  if (payload.status === 'starting') setRunning(true);
+  if (payload.status === 'running') setRunning(true);
+  if (payload.status === 'idle') {
+    // 会话结束/报错时收尾，避免思考计时器一直跑
+    flushThinking();
+    setRunning(false);
+  }
+  if (payload.sessionId) state.sessionId = payload.sessionId;
+  if (payload.ended) {
+    state.startedKeys.delete(key);
+    if (wasRunning) handleUnexpectedEnd();
+    state.sessionActive = false;
+    clearPrompts(key);
+  }
+  if (payload.cwd && payload.cwd !== state.cwd) setCwd(payload.cwd, false);
+}
+
+function handleSessionError(key, text) {
+  state.startedKeys.delete(key);
+  if (key !== state.activeKey) {
+    setSessionStatus(key, 'error');
+    return;
+  }
+  flushThinking();
+  finalizeStream();
+  clearInsertBadges();
+  clearPrompts(key);
+  markUnfinishedTools();
+  state.sessionActive = false;
+  setRunning(false);
+  finishActivity('任务出错', 'error');
+  showError(text || '会话出错');
+}
+
 function handleEvent(message) {
   state.lastEventAt = Date.now();
   try {
@@ -890,8 +962,76 @@ function handleUnexpectedEnd() {
   finishActivity('本轮任务未完成', 'error');
   appendNotice('本轮任务未完成：会话已结束（没有收到完成结果）');
   markUnfinishedTools();
-  const detail = state.lastStderr.trim().split('\n').filter(Boolean).pop();
+  const raw = state.lastStderrByKey.get(state.activeKey) || '';
+  const detail = raw.trim().split('\n').filter(Boolean).pop();
   if (detail) showError(`会话异常结束：${detail.slice(0, 300)}`);
+}
+
+/* ---------------- 多会话状态 ---------------- */
+
+function newSessionKey() {
+  return `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function registerSessionKey(key, sessionId) {
+  if (!key || !sessionId) return;
+  state.keyToSession.set(key, sessionId);
+  state.sessionKeys.set(sessionId, key);
+  applySessionStatusToDom(sessionId);
+  if (!state.sessions.some((session) => session.sessionId === sessionId)) refreshSessions();
+}
+
+function sessionTitleFor(key) {
+  const sessionId = state.keyToSession.get(key);
+  const session = state.sessions.find((item) => item.sessionId === sessionId);
+  return session?.title || state.keyTitles.get(key) || '当前会话';
+}
+
+function setSessionStatus(key, status) {
+  if (!key) return;
+  if (status) state.sessionStatus.set(key, status);
+  else state.sessionStatus.delete(key);
+  const sessionId = state.keyToSession.get(key);
+  if (sessionId) applySessionStatusToDom(sessionId);
+}
+
+function applySessionStatusToDom(sessionId) {
+  const key = state.sessionKeys.get(sessionId);
+  const status = key ? state.sessionStatus.get(key) : null;
+  for (const item of els.sessionList.querySelectorAll('.session-item')) {
+    if (item.dataset.sessionId !== sessionId) continue;
+    const dot = item.querySelector('.session-status');
+    if (dot) dot.className = `session-status${status ? ` ${status}` : ''}`;
+  }
+}
+
+function updateSessionStatusFromEvent(key, message) {
+  switch (message.type) {
+    case 'assistant':
+    case 'user':
+    case 'stream_event':
+    case 'tool_progress':
+      setSessionStatus(key, 'working');
+      break;
+    case 'result': {
+      const interrupted = /interrupt|aborted/i.test(
+        [message.result, ...(Array.isArray(message.errors) ? message.errors : [])]
+          .filter(Boolean)
+          .join(' ')
+      );
+      if (interrupted) setSessionStatus(key, null);
+      else if (message.is_error || message.subtype !== 'success') setSessionStatus(key, 'error');
+      else setSessionStatus(key, key === state.activeKey ? null : 'done');
+      // 新会话第一次跑完后才会出现在会话列表里，后台会话也要补一次刷新
+      const sessionId = state.keyToSession.get(key);
+      if (sessionId && !state.sessions.some((item) => item.sessionId === sessionId)) {
+        refreshSessions();
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 function setRunning(running) {
@@ -981,10 +1121,11 @@ function resetConversation() {
   state.toolCards.clear();
   state.sessionId = null;
   state.sessionActive = false;
-  state.switching = false;
+  state.activeKey = null;
   state.awaitingUser = false;
-  state.lastStderr = '';
-  clearPrompts();
+  state.replaying = false;
+  state.pendingEvents = [];
+  state.commands = [];
   clearActivity();
   hideSlashPalette();
   updateSessionTitle('');
@@ -1096,11 +1237,20 @@ function renderSessionItem(session) {
   title.className = 'title';
   title.textContent = session.title || '未命名会话';
 
+  const titleRow = document.createElement('span');
+  titleRow.className = 'session-title-row';
+  const statusDot = document.createElement('span');
+  statusDot.className = 'session-status';
+  const sessionKey = state.sessionKeys.get(session.sessionId);
+  const sessionStatus = sessionKey ? state.sessionStatus.get(sessionKey) : null;
+  if (sessionStatus) statusDot.classList.add(sessionStatus);
+  titleRow.append(title, statusDot);
+
   const sub = document.createElement('span');
   sub.className = 'sub';
   sub.textContent = [relativeTime(session.lastModified), session.gitBranch].filter(Boolean).join(' · ');
 
-  main.append(title, sub);
+  main.append(titleRow, sub);
   main.addEventListener('click', () => {
     if (state.selectMode) {
       toggleSelected(session.sessionId);
@@ -1231,6 +1381,7 @@ function batchMoveToTrash() {
   if (sessions.length === 0) return;
   if (!window.confirm(`把选中的 ${sessions.length} 个会话移到回收站？`)) return;
   if (!addToTrash(sessions)) return;
+  for (const session of sessions) closeSessionBackend(session.sessionId);
   if (sessions.some((session) => session.sessionId === state.sessionId)) newSession();
   toggleSelectMode(false);
   renderTrash();
@@ -1261,6 +1412,7 @@ function addToTrash(sessions) {
 
 function moveToTrash(session) {
   if (!addToTrash([session])) return;
+  closeSessionBackend(session.sessionId);
   if (state.sessionId === session.sessionId) newSession();
   renderSessionGroups();
   renderTrash();
@@ -1271,6 +1423,7 @@ function moveGroupToTrash(group) {
   const ok = window.confirm(`把「${group.name}」下的 ${group.sessions.length} 个会话全部移到回收站？`);
   if (!ok) return;
   if (!addToTrash(group.sessions)) return;
+  for (const session of group.sessions) closeSessionBackend(session.sessionId);
   if (group.sessions.some((session) => session.sessionId === state.sessionId)) newSession();
   renderSessionGroups();
   renderTrash();
@@ -1284,6 +1437,7 @@ function restoreFromTrash(sessionId) {
 
 async function deleteForever(item) {
   if (!window.confirm(`彻底删除「${item.title || '未命名会话'}」？此操作不可恢复。`)) return;
+  await closeSessionBackend(item.sessionId);
   const result = await window.desk.deleteSession({ sessionId: item.sessionId, dir: item.cwd });
   if (!result?.ok) {
     showError(result?.error || '删除失败');
@@ -1459,50 +1613,70 @@ async function refreshMcp() {
   }
 }
 
-/** 当前回合还在运行时切换会话会中断任务，先跟用户确认。 */
-function confirmSwitchAway() {
-  if (!state.running && !state.sending) return true;
-  return window.confirm('当前任务还在运行，切换会话会中断它。确定要切换吗？');
-}
-
 async function createSessionInDir(dir) {
-  if (!confirmSwitchAway()) return;
-  state.switching = true;
-  await window.desk.closeSession();
   resetConversation();
   setCwd(dir);
   els.input.focus();
 }
 
 async function newSession() {
-  if (!confirmSwitchAway()) return;
-  state.switching = true;
-  await window.desk.closeSession();
   resetConversation();
   els.input.focus();
   refreshSessions();
 }
 
+/** 关闭某个会话的后端进程（删除/移入回收站时用）。 */
+async function closeSessionBackend(sessionId) {
+  const key = state.sessionKeys.get(sessionId);
+  if (!key) return;
+  state.startedKeys.delete(key);
+  state.sessionStatus.delete(key);
+  state.sessionKeys.delete(sessionId);
+  state.keyToSession.delete(key);
+  state.keyTitles.delete(key);
+  state.commandsByKey.delete(key);
+  state.lastStderrByKey.delete(key);
+  clearPrompts(key);
+  if (state.activeKey === key) {
+    state.activeKey = null;
+    state.sessionActive = false;
+    setRunning(false);
+  }
+  await window.desk.closeSession({ key });
+}
+
 async function resumeSession(session) {
-  if (!confirmSwitchAway()) return;
-  state.switching = true;
-  clearActivity();
-  await window.desk.closeSession();
+  const key = state.sessionKeys.get(session.sessionId) || session.sessionId;
+  if (key === state.activeKey && session.sessionId === state.sessionId) {
+    els.input.focus();
+    return;
+  }
+
   const dir = session.cwd || state.cwd;
+  state.activeKey = key;
+  state.sessionId = session.sessionId;
+  state.sessionActive = state.startedKeys.has(key);
+  state.keyTitles.set(key, session.title || state.keyTitles.get(key) || '当前会话');
+
+  const status = state.sessionStatus.get(key);
+  const busy = status === 'working' || status === 'waiting';
+
   flushThinking();
+  clearActivity();
   els.messages.innerHTML = '';
   state.toolCards.clear();
   state.streamEl = null;
-  state.sessionId = session.sessionId;
-  state.switching = false;
-  state.lastStderr = '';
-  clearPrompts();
+  state.commands = state.commandsByKey.get(key) || [];
+  if (status === 'done' || status === 'error') setSessionStatus(key, null);
+  setRunning(busy);
+  if (busy) setActivity('正在工作…');
   if (dir) setCwd(dir, true);
   updateSessionTitle(session.title);
 
-  const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
+  state.pendingEvents = [];
   state.replaying = true;
   try {
+    const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
     if (history?.ok && Array.isArray(history.messages)) {
       for (const item of history.messages) {
         const payload = { ...item, session_id: session.sessionId };
@@ -1527,48 +1701,70 @@ async function resumeSession(session) {
     }
   } finally {
     state.replaying = false;
+    const pending = state.pendingEvents;
+    state.pendingEvents = [];
+    if (key === state.activeKey) {
+      for (const message of pending) handleEvent(message);
+    }
   }
 
-  const result = await window.desk.resumeSession({
-    sessionId: session.sessionId,
-    cwd: dir,
-    model: state.model,
-    permissionMode: state.permissionMode,
-  });
-  if (!result?.ok) showError(result?.error || '恢复会话失败');
-  else state.sessionActive = true;
+  if (!state.startedKeys.has(key)) {
+    const result = await window.desk.resumeSession({
+      key,
+      sessionId: session.sessionId,
+      cwd: dir,
+      model: state.model,
+      permissionMode: state.permissionMode,
+    });
+    if (!result?.ok) showError(result?.error || '恢复会话失败');
+    else {
+      state.startedKeys.add(key);
+      state.sessionActive = true;
+    }
+  }
   scrollToBottom(true);
   refreshSessions();
 }
 
 /* ---------------- 权限弹窗 ---------------- */
 
-function clearPermissionUI() {
-  state.permissionQueue = [];
-  state.currentPermission = null;
-  els.permModal.hidden = true;
+function clearPrompts(key) {
+  state.permissionQueue = state.permissionQueue.filter((entry) => entry.key !== key);
+  state.questionQueue = state.questionQueue.filter((request) => request.__key !== key);
+  state.planQueue = state.planQueue.filter((request) => request.__key !== key);
+  if (state.currentPermission?.key === key) {
+    state.currentPermission = null;
+    els.permModal.hidden = true;
+  }
+  if (state.currentQuestion?.__key === key) {
+    state.currentQuestion = null;
+    els.questionModal.hidden = true;
+  }
+  if (state.currentPlan?.__key === key) {
+    state.currentPlan = null;
+    els.planModal.hidden = true;
+  }
+  if (!state.currentPermission && !state.currentQuestion && !state.currentPlan) {
+    state.awaitingUser = false;
+  }
+  pumpQuestions();
+  pumpPlans();
 }
 
-function clearPrompts() {
-  state.currentQuestion = null;
-  state.currentPlan = null;
-  state.awaitingUser = false;
-  els.questionModal.hidden = true;
-  els.planModal.hidden = true;
-  clearPermissionUI();
-}
-
-function enqueuePermission(request) {
-  state.permissionQueue.push(request);
+function enqueuePermission(key, request) {
+  state.permissionQueue.push({ key, request });
   pumpPermission();
 }
 
 function pumpPermission() {
   if (state.currentPermission || state.permissionQueue.length === 0) return;
-  const request = state.permissionQueue.shift();
-  state.currentPermission = request;
+  const entry = state.permissionQueue.shift();
+  state.currentPermission = entry;
+  const { key, request } = entry;
 
-  els.permTitle.textContent = request.title || `Claude 想要执行 ${request.toolName}`;
+  els.permTitle.textContent = `${sessionTitleFor(key)} · ${
+    request.title || `Claude 想要执行 ${request.toolName}`
+  }`;
   els.permDetail.textContent = [request.displayName, request.description, request.decisionReason]
     .filter(Boolean)
     .join(' · ');
@@ -1576,18 +1772,22 @@ function pumpPermission() {
   els.permAllowSession.hidden = !request.canAlwaysAllow;
   els.permModal.hidden = false;
   els.permAllow.focus();
+  setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
-  setActivity('等待你确认权限…');
+  if (key === state.activeKey) setActivity('等待你确认权限…');
 }
 
 async function answerPermission(decision) {
-  const request = state.currentPermission;
-  if (!request) return;
+  const entry = state.currentPermission;
+  if (!entry) return;
   state.currentPermission = null;
   els.permModal.hidden = true;
-  await window.desk.respondPermission(request.id, decision);
-  state.awaitingUser = false;
-  setActivity('等待模型响应…');
+  await window.desk.respondPermission({ key: entry.key, id: entry.request.id, decision });
+  setSessionStatus(entry.key, 'working');
+  if (entry.key === state.activeKey) {
+    state.awaitingUser = false;
+    setActivity('等待模型响应…');
+  }
   pumpPermission();
 }
 
@@ -1669,16 +1869,34 @@ function renderQuestionBlock(question, index) {
   return block;
 }
 
-function showQuestion(request) {
+function setModalHeading(modal, base, key) {
+  const heading = modal.querySelector('h3');
+  if (!heading) return;
+  heading.textContent = key === state.activeKey ? base : `「${sessionTitleFor(key)}」${base}`;
+}
+
+function showQuestion(key, request) {
+  request.__key = key;
+  state.questionQueue.push(request);
+  pumpQuestions();
+}
+
+function pumpQuestions() {
+  if (state.currentQuestion || state.questionQueue.length === 0) return;
+  const request = state.questionQueue.shift();
   state.currentQuestion = request;
+  const key = request.__key;
+
   els.questionList.innerHTML = '';
   (request.questions || []).forEach((question, index) => {
     els.questionList.appendChild(renderQuestionBlock(question, index));
   });
+  setModalHeading(els.questionModal, 'Claude 想确认一下', key);
   els.questionModal.hidden = false;
   els.questionSubmit.focus();
+  setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
-  setActivity('等待你回答问题…');
+  if (key === state.activeKey) setActivity('等待你回答问题…');
 }
 
 function collectAnswers() {
@@ -1710,47 +1928,78 @@ function collectAnswers() {
 async function submitQuestion() {
   const request = state.currentQuestion;
   if (!request) return;
+  const key = request.__key;
   const answers = collectAnswers();
   state.currentQuestion = null;
   els.questionModal.hidden = true;
 
   if (Object.keys(answers).length > 0) {
-    await window.desk.respondQuestion(request.id, { answers });
+    await window.desk.respondQuestion({ key, id: request.id, answers });
   } else {
-    await window.desk.respondQuestion(request.id, { response: '用户没有做出选择，请自行判断后继续。' });
+    await window.desk.respondQuestion({
+      key,
+      id: request.id,
+      response: '用户没有做出选择，请自行判断后继续。',
+    });
   }
-  state.awaitingUser = false;
-  setActivity('等待模型响应…');
+  setSessionStatus(key, 'working');
+  if (key === state.activeKey) {
+    state.awaitingUser = false;
+    setActivity('等待模型响应…');
+  }
+  pumpQuestions();
 }
 
 async function skipQuestion() {
   const request = state.currentQuestion;
   if (!request) return;
+  const key = request.__key;
   state.currentQuestion = null;
   els.questionModal.hidden = true;
-  await window.desk.respondQuestion(request.id, { response: '用户跳过了这些问题，请自行判断后继续。' });
-  state.awaitingUser = false;
-  setActivity('等待模型响应…');
+  await window.desk.respondQuestion({
+    key,
+    id: request.id,
+    response: '用户跳过了这些问题，请自行判断后继续。',
+  });
+  setSessionStatus(key, 'working');
+  if (key === state.activeKey) {
+    state.awaitingUser = false;
+    setActivity('等待模型响应…');
+  }
+  pumpQuestions();
 }
 
 /* ---------------- 计划审批 ---------------- */
 
-function showPlan(request) {
+function showPlan(key, request) {
+  request.__key = key;
+  state.planQueue.push(request);
+  pumpPlans();
+}
+
+function pumpPlans() {
+  if (state.currentPlan || state.planQueue.length === 0) return;
+  const request = state.planQueue.shift();
   state.currentPlan = request;
+  const key = request.__key;
+
   els.planBody.innerHTML = renderMarkdown(request.plan || '（计划内容为空）');
   highlightCode(els.planBody);
   els.planFeedbackWrap.hidden = true;
   els.planFeedback.value = '';
   els.planReject.textContent = '拒绝，继续修改';
+  setModalHeading(els.planModal, '计划待确认', key);
   els.planModal.hidden = false;
   els.planApprove.focus();
+  setSessionStatus(key, 'waiting');
   state.awaitingUser = true;
-  setActivity('等待你审批计划…');
+  if (key === state.activeKey) setActivity('等待你审批计划…');
 }
 
 async function respondPlan(decision) {
   const request = state.currentPlan;
   if (!request) return;
+  const key = request.__key;
 
   const feedback = els.planFeedback.value.trim();
   state.currentPlan = null;
@@ -1765,10 +2014,21 @@ async function respondPlan(decision) {
     window.desk.saveSettings({ permissionMode: 'default' });
   }
 
-  await window.desk.respondPlan(request.id, decision, undefined, decision === 'reject' ? feedback : undefined);
-  if (decision === 'approve' && state.sessionActive) window.desk.setPermissionMode('default');
-  state.awaitingUser = false;
-  setActivity('等待模型响应…');
+  await window.desk.respondPlan({
+    key,
+    id: request.id,
+    decision,
+    feedback: decision === 'reject' ? feedback : undefined,
+  });
+  if (decision === 'approve' && state.sessionActive) {
+    window.desk.setPermissionMode({ key, mode: 'default' });
+  }
+  setSessionStatus(key, 'working');
+  if (key === state.activeKey) {
+    state.awaitingUser = false;
+    setActivity('等待模型响应…');
+  }
+  pumpPlans();
 }
 
 /* ---------------- 斜杠命令 ---------------- */
@@ -2092,7 +2352,7 @@ function autosize() {
 }
 
 async function ensureSession() {
-  if (state.sessionActive) return true;
+  if (state.activeKey && state.startedKeys.has(state.activeKey)) return true;
   if (!state.cwd) {
     const picked = await window.desk.pickDirectory();
     if (!picked?.ok || !picked.path) {
@@ -2102,16 +2362,28 @@ async function ensureSession() {
     setCwd(picked.path);
   }
   clearError();
-  const result = await window.desk.startSession({
+
+  const key = state.activeKey || state.sessionId || newSessionKey();
+  state.activeKey = key;
+  if (!state.keyTitles.get(key)) {
+    state.keyTitles.set(key, els.sessionTitle.textContent || '当前会话');
+  }
+  const options = {
+    key,
     cwd: state.cwd,
     model: state.model,
     permissionMode: state.permissionMode,
-  });
+  };
+  const result = state.sessionId
+    ? await window.desk.resumeSession({ ...options, sessionId: state.sessionId })
+    : await window.desk.startSession(options);
   if (!result?.ok) {
     showError(result?.error || '启动会话失败');
     return false;
   }
+  state.startedKeys.add(key);
   state.sessionActive = true;
+  setSessionStatus(key, 'working');
   return true;
 }
 
@@ -2132,11 +2404,11 @@ async function sendMessage() {
     autosize();
     hideSlashPalette();
     setRunning(true);
-    state.lastStderr = '';
+    state.lastStderrByKey.delete(state.activeKey);
     state.awaitingUser = false;
     setActivity('等待模型响应…');
 
-    const result = await window.desk.send(text, { steer });
+    const result = await window.desk.send(text, { key: state.activeKey, steer });
     if (!result?.ok) {
       setRunning(false);
       finishActivity('发送失败', 'error');
@@ -2151,7 +2423,7 @@ async function sendMessage() {
 
 async function stopCurrent() {
   if (state.running) setActivity('正在停止…');
-  await window.desk.interrupt();
+  await window.desk.interrupt({ key: state.activeKey });
   setRunning(false);
 }
 
@@ -2314,7 +2586,7 @@ async function init() {
     }
     state.permissionMode = mode;
     await window.desk.saveSettings({ permissionMode: mode });
-    if (state.sessionActive) await window.desk.setPermissionMode(mode);
+    if (state.sessionActive) await window.desk.setPermissionMode({ key: state.activeKey, mode });
   });
 
   $('open-settings').addEventListener('click', () => {
@@ -2338,29 +2610,15 @@ async function init() {
     window.desk.saveSettings({ fontSize: Number(els.fontSize.value) });
   });
 
-  window.desk.onEvent(handleEvent);
-  window.desk.onState((payload) => {
-    const wasRunning = state.running;
-    if (payload.status === 'starting') setRunning(true);
-    if (payload.status === 'running') setRunning(true);
-    if (payload.status === 'idle') {
-      // 会话结束/报错时收尾，避免思考计时器一直跑
-      flushThinking();
-      setRunning(false);
-    }
-    if (payload.sessionId) state.sessionId = payload.sessionId;
-    if (payload.ended) {
-      const sameSession = !payload.sessionId || payload.sessionId === state.sessionId;
-      if (wasRunning && sameSession && !state.switching) handleUnexpectedEnd();
-      state.sessionActive = false;
-      clearPrompts();
-    }
-    if (payload.cwd && payload.cwd !== state.cwd) setCwd(payload.cwd, false);
+  window.desk.onEvent(({ key, message }) => handleSessionEvent(key, message));
+  window.desk.onState(({ key, ...payload }) => handleSessionState(key, payload));
+  window.desk.onPermission(({ key, request }) => enqueuePermission(key, request));
+  window.desk.onQuestion(({ key, request }) => showQuestion(key, request));
+  window.desk.onPlan(({ key, request }) => showPlan(key, request));
+  window.desk.onCommands(({ key, commands }) => {
+    state.commandsByKey.set(key, Array.isArray(commands) ? commands : []);
+    if (key === state.activeKey) handleCommands(commands);
   });
-  window.desk.onPermission(enqueuePermission);
-  window.desk.onQuestion(showQuestion);
-  window.desk.onPlan(showPlan);
-  window.desk.onCommands(handleCommands);
   window.desk.onPtyData(({ data }) => state.terminal?.write(data));
   window.desk.onPtyExit((info) => {
     state.terminalStarted = false;
@@ -2376,19 +2634,11 @@ async function init() {
   });
   window.desk.onMenuExport(exportCurrentSession);
   window.desk.onMenuFind(openFindBar);
-  window.desk.onError((payload) => {
-    flushThinking();
-    finalizeStream();
-    clearInsertBadges();
-    clearPrompts();
-    markUnfinishedTools();
-    setRunning(false);
-    finishActivity('任务出错', 'error');
-    showError(payload?.message || '会话出错');
-  });
-  window.desk.onStderr((text) => {
-    if (!text) return;
-    state.lastStderr = (state.lastStderr + String(text)).slice(-1000);
+  window.desk.onError(({ key, message }) => handleSessionError(key, message));
+  window.desk.onStderr(({ key, text }) => {
+    if (!key || !text) return;
+    const prev = state.lastStderrByKey.get(key) || '';
+    state.lastStderrByKey.set(key, (prev + String(text)).slice(-1000));
   });
   window.desk.onNewSession(newSession);
   window.desk.onPickDirectory(async () => {

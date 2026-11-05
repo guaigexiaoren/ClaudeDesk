@@ -41,7 +41,9 @@ let mainWindow = null;
 let quickWindow = null;
 let tray = null;
 let store = null;
-let session = null;
+// 多个对话可以同时运行：key 由渲染进程生成，每个 key 对应一个独立的会话进程
+const sessions = new Map();
+let focusedKey = null;
 let terminal = null;
 let isQuitting = false;
 const QUICK_SHORTCUT = 'CommandOrControl+Alt+Space';
@@ -354,7 +356,7 @@ async function runPlanSmoke() {
   await new Promise((resolve) => setTimeout(resolve, 2500));
 
   const started = await wc.executeJavaScript(
-    `window.desk.startSession({ cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'plan' })`
+    `window.desk.startSession({ key: 'smoke', cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'plan' })`
   );
   console.log('SMOKE_PLAN_START', JSON.stringify(started));
   await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -425,7 +427,7 @@ async function runUiSmoke() {
 
   // 启动一个空会话，拿到 init 消息里的斜杠命令列表
   const started = await wc.executeJavaScript(
-    `window.desk.startSession({ cwd: ${JSON.stringify(process.cwd())}, model: 'default', permissionMode: 'default' })`
+    `window.desk.startSession({ key: 'smoke', cwd: ${JSON.stringify(process.cwd())}, model: 'default', permissionMode: 'default' })`
   );
   console.log('SMOKE_UI_START', JSON.stringify(started));
   await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -439,18 +441,21 @@ async function runUiSmoke() {
   })()`);
 
   wc.send('session:question', {
-    id: 'smoke-question',
-    toolName: 'AskUserQuestion',
-    questions: [
-      {
-        question: '用哪个 Markdown 库？',
-        header: '库',
-        options: [
-          { label: 'marked', description: '轻量、快' },
-          { label: 'remark', description: '插件生态大' },
-        ],
-      },
-    ],
+    key: 'smoke',
+    request: {
+      id: 'smoke-question',
+      toolName: 'AskUserQuestion',
+      questions: [
+        {
+          question: '用哪个 Markdown 库？',
+          header: '库',
+          options: [
+            { label: 'marked', description: '轻量、快' },
+            { label: 'remark', description: '插件生态大' },
+          ],
+        },
+      ],
+    },
   });
   await new Promise((resolve) => setTimeout(resolve, 600));
 
@@ -465,9 +470,12 @@ async function runUiSmoke() {
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   wc.send('session:plan', {
-    id: 'smoke-plan',
-    toolName: 'ExitPlanMode',
-    plan: '# 测试计划\n\n1. 第一步\n2. 第二步',
+    key: 'smoke',
+    request: {
+      id: 'smoke-plan',
+      toolName: 'ExitPlanMode',
+      plan: '# 测试计划\n\n1. 第一步\n2. 第二步',
+    },
   });
   await new Promise((resolve) => setTimeout(resolve, 600));
 
@@ -542,7 +550,7 @@ async function runQuestionSmoke() {
   await new Promise((resolve) => setTimeout(resolve, 2500));
 
   const started = await wc.executeJavaScript(
-    `window.desk.startSession({ cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
+    `window.desk.startSession({ key: 'smoke', cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
   );
   console.log('SMOKE_Q_START', JSON.stringify(started));
   await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -601,7 +609,7 @@ async function runSteerSmoke() {
   await new Promise((resolve) => setTimeout(resolve, 2500));
 
   const started = await wc.executeJavaScript(
-    `window.desk.startSession({ cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
+    `window.desk.startSession({ key: 'smoke', cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
   );
   console.log('SMOKE_STEER_START', JSON.stringify(started));
   await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -674,7 +682,7 @@ async function runBypassSmoke() {
 
   await new Promise((resolve) => setTimeout(resolve, 2500));
   await wc.executeJavaScript(
-    `window.desk.startSession({ cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
+    `window.desk.startSession({ key: 'smoke', cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'default' })`
   );
   await new Promise((resolve) => setTimeout(resolve, 3000));
 
@@ -729,26 +737,42 @@ function resolveClaudeExecutable() {
   );
 }
 
-function attachSession() {
-  session = new SessionManager({ claudeExecutable: resolveClaudeExecutable() });
+function createSessionManager(key) {
+  const manager = new SessionManager({ claudeExecutable: resolveClaudeExecutable() });
 
-  session.on('state', (state) => send('session:state', state));
-  session.on('message', (message) => send('session:event', message));
-  session.on('permission', (request) => send('session:permission', request));
-  session.on('question', (request) => send('session:question', request));
-  session.on('plan', (request) => send('session:plan', request));
-  session.on('commands', (commands) => send('session:commands', commands));
-  session.on('error', (err) => send('session:error', { message: err?.message || String(err) }));
-  session.on('stderr', (data) => {
-    if (process.env.CLAUDE_DESK_DEBUG) console.error('[claude]', data);
-    send('session:stderr', String(data || ''));
-  });
-
-  session.on('state', (state) => {
-    if (state.sessionId) {
+  manager.on('state', (state) => {
+    send('session:state', { key, ...state });
+    // 只有当前操作的会话才更新「上次会话」，避免后台会话把设置写乱
+    if (state.sessionId && key === focusedKey) {
       store.merge({ lastSessionId: state.sessionId, cwd: state.cwd || store.get().cwd });
     }
   });
+  manager.on('message', (message) => send('session:event', { key, message }));
+  manager.on('permission', (request) => send('session:permission', { key, request }));
+  manager.on('question', (request) => send('session:question', { key, request }));
+  manager.on('plan', (request) => send('session:plan', { key, request }));
+  manager.on('commands', (commands) => send('session:commands', { key, commands }));
+  manager.on('error', (err) => send('session:error', { key, message: err?.message || String(err) }));
+  manager.on('stderr', (data) => {
+    if (process.env.CLAUDE_DESK_DEBUG) console.error(`[claude:${key}]`, data);
+    send('session:stderr', { key, text: String(data || '') });
+  });
+
+  sessions.set(key, manager);
+  return manager;
+}
+
+function getSessionManager(key) {
+  return key ? sessions.get(key) || null : null;
+}
+
+async function closeSessionManager(key) {
+  const manager = sessions.get(key);
+  sessions.delete(key);
+  if (!manager) return { ok: true };
+  await manager.close();
+  if (focusedKey === key) focusedKey = null;
+  return { ok: true };
 }
 
 function registerIpc() {
@@ -922,9 +946,11 @@ function registerIpc() {
 
   ipcMain.handle(
     'session:rewind',
-    safe(async ({ userMessageId, dryRun } = {}) => {
+    safe(async ({ key, userMessageId, dryRun } = {}) => {
       if (!userMessageId) return { ok: false, error: '缺少消息 ID' };
-      const result = await session.rewindFiles(userMessageId, { dryRun: Boolean(dryRun) });
+      const manager = getSessionManager(key);
+      if (!manager) return { ok: false, error: '会话尚未启动' };
+      const result = await manager.rewindFiles(userMessageId, { dryRun: Boolean(dryRun) });
       return { ok: true, result };
     })
   );
@@ -974,9 +1000,13 @@ function registerIpc() {
 
   ipcMain.handle(
     'session:start',
-    safe(async (payload) => {
-      await session.close();
-      const result = await session.start({ ...payload });
+    safe(async ({ key, ...payload } = {}) => {
+      if (!key) return { ok: false, error: '缺少会话标识' };
+      let manager = sessions.get(key);
+      if (!manager) manager = createSessionManager(key);
+      else await manager.close();
+      focusedKey = key;
+      const result = await manager.start({ ...payload });
       const patch = { cwd: payload?.cwd || store.get().cwd };
       if (payload?.model) patch.model = payload.model;
       if (payload?.permissionMode) patch.permissionMode = payload.permissionMode;
@@ -987,9 +1017,13 @@ function registerIpc() {
 
   ipcMain.handle(
     'session:resume',
-    safe(async ({ sessionId, cwd, model, permissionMode }) => {
-      await session.close();
-      const result = await session.start({ cwd, model, permissionMode, resume: sessionId });
+    safe(async ({ key, sessionId, cwd, model, permissionMode } = {}) => {
+      if (!key) return { ok: false, error: '缺少会话标识' };
+      let manager = sessions.get(key);
+      if (!manager) manager = createSessionManager(key);
+      else await manager.close();
+      focusedKey = key;
+      const result = await manager.start({ cwd, model, permissionMode, resume: sessionId });
       store.merge({ cwd: cwd || store.get().cwd, lastSessionId: sessionId });
       return result;
     })
@@ -997,44 +1031,67 @@ function registerIpc() {
 
   ipcMain.handle(
     'session:send',
-    safe(async ({ text, steer }) => session.send(text, { priority: steer ? 'next' : undefined }))
+    safe(async ({ key, text, steer } = {}) => {
+      const manager = getSessionManager(key);
+      if (!manager) return { ok: false, error: '会话尚未启动' };
+      focusedKey = key;
+      return manager.send(text, { priority: steer ? 'next' : undefined });
+    })
   );
 
-  ipcMain.handle('session:interrupt', safe(async () => session.interrupt()));
+  ipcMain.handle(
+    'session:interrupt',
+    safe(async ({ key } = {}) => {
+      const manager = getSessionManager(key);
+      return manager ? manager.interrupt() : { ok: true };
+    })
+  );
 
   ipcMain.handle(
     'session:set-model',
-    safe(async ({ model }) => {
+    safe(async ({ key, model } = {}) => {
       store.merge({ model });
-      return session.setModel(model);
+      const manager = getSessionManager(key);
+      return manager ? manager.setModel(model) : { ok: true };
     })
   );
 
   ipcMain.handle(
     'session:set-permission-mode',
-    safe(async ({ mode }) => {
+    safe(async ({ key, mode } = {}) => {
       store.merge({ permissionMode: mode });
-      return session.setPermissionMode(mode);
+      const manager = getSessionManager(key);
+      return manager ? manager.setPermissionMode(mode) : { ok: true };
     })
   );
 
-  ipcMain.handle('session:close', safe(async () => session.close()));
+  ipcMain.handle('session:close', safe(async ({ key } = {}) => closeSessionManager(key)));
 
   ipcMain.handle(
     'permission:respond',
-    safe(async ({ id, decision }) => session.respondPermission(id, decision))
+    safe(async ({ key, id, decision } = {}) => {
+      const manager = getSessionManager(key);
+      if (!manager) return { ok: false, error: '会话已关闭' };
+      return manager.respondPermission(id, decision);
+    })
   );
 
   ipcMain.handle(
     'question:respond',
-    safe(async ({ id, answers, response }) => session.respondQuestion(id, { answers, response }))
+    safe(async ({ key, id, answers, response } = {}) => {
+      const manager = getSessionManager(key);
+      if (!manager) return { ok: false, error: '会话已关闭' };
+      return manager.respondQuestion(id, { answers, response });
+    })
   );
 
   ipcMain.handle(
     'plan:respond',
-    safe(async ({ id, decision, editedPlan, feedback }) =>
-      session.respondPlan(id, decision, editedPlan, feedback)
-    )
+    safe(async ({ key, id, decision, editedPlan, feedback } = {}) => {
+      const manager = getSessionManager(key);
+      if (!manager) return { ok: false, error: '会话已关闭' };
+      return manager.respondPlan(id, decision, editedPlan, feedback);
+    })
   );
 }
 
@@ -1126,7 +1183,6 @@ if (!gotLock) {
     app.setAppUserModelId('com.yymy.claudedesk');
     store = new Store(app.getPath('userData'));
     terminal = new TerminalSession();
-    attachSession();
     registerIpc();
     buildMenu();
     createWindow();
@@ -1157,6 +1213,7 @@ if (!gotLock) {
     isQuitting = true;
     globalShortcut.unregisterAll();
     if (terminal) terminal.stop();
-    if (session) session.close();
+    for (const manager of sessions.values()) manager.close();
+    sessions.clear();
   });
 }
