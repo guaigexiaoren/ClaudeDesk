@@ -181,7 +181,9 @@ const els = {
   trashArrow: $('trash-arrow'),
   trashList: $('trash-list'),
   trashCount: $('trash-count'),
-  modeSelect: $('mode-select'),
+  permissionButton: $('permission-button'),
+  permissionMenu: $('permission-menu'),
+  permissionLabel: $('permission-label'),
   permModal: $('permission-modal'),
   permTitle: $('perm-title'),
   permDetail: $('perm-detail'),
@@ -1347,6 +1349,54 @@ function setCwd(dir, persist = true) {
   }
 }
 
+/* ---------------- 权限模式 ---------------- */
+
+const PERMISSION_MODES = [
+  { value: 'plan', label: '计划模式', desc: '开启计划模式' },
+  { value: 'default', label: '请求批准', desc: '编辑外部文件和使用互联网时始终询问' },
+  { value: 'auto', label: '替我审批', desc: '仅对检测到的风险操作请求批准' },
+  {
+    value: 'bypassPermissions',
+    label: '完全访问权限',
+    desc: '可不受限制地访问互联网和您电脑上的任何文件',
+  },
+];
+
+function permissionModeInfo(mode) {
+  return PERMISSION_MODES.find((item) => item.value === mode) || PERMISSION_MODES[1];
+}
+
+function renderPermissionMode(mode) {
+  const info = permissionModeInfo(mode);
+  els.permissionLabel.textContent = info.label;
+  for (const option of els.permissionMenu.querySelectorAll('.permission-option')) {
+    option.classList.toggle('selected', option.dataset.mode === info.value);
+  }
+}
+
+function setPermissionModeUI(mode) {
+  const info = permissionModeInfo(mode);
+  state.permissionMode = info.value;
+  renderPermissionMode(info.value);
+  return info.value;
+}
+
+async function changePermissionMode(mode) {
+  if (
+    mode === 'bypassPermissions' &&
+    !window.confirm('「完全访问权限」会让 Claude 无需确认即可访问互联网和电脑上的任何文件，确定开启吗？')
+  ) {
+    return;
+  }
+  const selected = setPermissionModeUI(mode);
+  els.permissionMenu.hidden = true;
+  await window.desk.saveSettings({ permissionMode: selected });
+  if (state.sessionActive) {
+    const result = await window.desk.setPermissionMode({ key: state.activeKey, mode: selected });
+    if (!result?.ok) showError(result?.error || '切换权限模式失败');
+  }
+}
+
 function applyAccent(key) {
   const accent = ACCENTS[key] || ACCENTS.claude;
   state.accent = ACCENTS[key] ? key : 'claude';
@@ -2300,7 +2350,7 @@ async function respondPlan(decision) {
 
   if (decision === 'approve') {
     state.permissionMode = 'default';
-    els.modeSelect.value = 'default';
+    setPermissionModeUI('default');
     window.desk.saveSettings({ permissionMode: 'default' });
   }
 
@@ -2735,8 +2785,13 @@ async function init() {
   if (initial?.ok) {
     state.settings = initial.settings || {};
     state.model = 'default';
-    state.permissionMode = state.settings.permissionMode || 'default';
-    els.modeSelect.value = state.permissionMode;
+    const initialMode = state.settings.permissionMode || 'default';
+    const modeValue = PERMISSION_MODES.some((item) => item.value === initialMode)
+      ? initialMode
+      : 'default';
+    state.permissionMode = modeValue;
+    renderPermissionMode(modeValue);
+    if (modeValue !== initialMode) window.desk.saveSettings({ permissionMode: modeValue });
     applyAccent(state.settings.accent || 'claude');
 
     const fontSize = state.settings.fontSize || 14;
@@ -2891,18 +2946,23 @@ async function init() {
     }
   });
 
-  els.modeSelect.addEventListener('change', async () => {
-    const mode = els.modeSelect.value;
-    if (
-      mode === 'bypassPermissions' &&
-      !window.confirm('「全部放行」会让 Claude 无需确认即可执行任何命令和修改文件，确定开启吗？')
-    ) {
-      els.modeSelect.value = state.permissionMode;
-      return;
+  els.permissionButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    els.permissionMenu.hidden = !els.permissionMenu.hidden;
+  });
+  els.permissionMenu.addEventListener('click', (event) => {
+    const option = event.target.closest('.permission-option');
+    if (option) changePermissionMode(option.dataset.mode);
+  });
+  document.addEventListener('click', (event) => {
+    if (!els.permissionMenu.hidden && !event.target.closest('.permission-control')) {
+      els.permissionMenu.hidden = true;
     }
-    state.permissionMode = mode;
-    await window.desk.saveSettings({ permissionMode: mode });
-    if (state.sessionActive) await window.desk.setPermissionMode({ key: state.activeKey, mode });
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !els.permissionMenu.hidden) {
+      els.permissionMenu.hidden = true;
+    }
   });
 
   $('open-settings').addEventListener('click', () => {

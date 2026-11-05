@@ -61,20 +61,35 @@
             <span id="status-dot" class="dot idle"></span>
             <span id="session-title">新会话</span>
             <span id="session-meta" class="meta"></span>
+            <div class="control permission-control">
+              <button id="permission-button" class="permission-button" title="权限模式">
+                <span id="permission-label">请求批准</span>
+                <span class="permission-caret">▾</span>
+              </button>
+              <div id="permission-menu" class="permission-menu" hidden>
+                <button class="permission-option" data-mode="plan">
+                  <span class="permission-option-title">计划模式</span>
+                  <span class="permission-option-desc">开启计划模式</span>
+                </button>
+                <button class="permission-option" data-mode="default">
+                  <span class="permission-option-title">请求批准</span>
+                  <span class="permission-option-desc">编辑外部文件和使用互联网时始终询问</span>
+                </button>
+                <button class="permission-option" data-mode="auto">
+                  <span class="permission-option-title">替我审批</span>
+                  <span class="permission-option-desc">仅对检测到的风险操作请求批准</span>
+                </button>
+                <button class="permission-option" data-mode="bypassPermissions">
+                  <span class="permission-option-title">完全访问权限</span>
+                  <span class="permission-option-desc">可不受限制地访问互联网和您电脑上的任何文件</span>
+                </button>
+              </div>
+            </div>
           </div>
           <div class="topbar-right">
             <button id="toggle-terminal" class="ghost-button terminal-toggle" title="打开/关闭终端面板">
               终端
             </button>
-            <label class="control">
-              <span>权限</span>
-              <select id="mode-select">
-                <option value="default">每次询问</option>
-                <option value="acceptEdits">自动接受编辑</option>
-                <option value="plan">只读规划</option>
-                <option value="bypassPermissions">全部放行</option>
-              </select>
-            </label>
           </div>
         </header>
 

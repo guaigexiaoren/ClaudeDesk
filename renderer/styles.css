@@ -450,6 +450,81 @@ select:hover {
   color: var(--faint);
 }
 
+/* 权限模式选择器 */
+
+.permission-control {
+  position: relative;
+  margin-left: 4px;
+}
+
+.permission-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.permission-button:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.permission-caret {
+  font-size: 9px;
+  color: var(--faint);
+}
+
+.permission-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 320px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 40;
+}
+
+.permission-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: 7px;
+  color: var(--muted);
+}
+
+.permission-option:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.permission-option.selected {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.permission-option-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.permission-option-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+
 .dot {
   width: 8px;
   height: 8px;
