@@ -111,6 +111,7 @@ const state = {
   running: false,
   sending: false,
   streamEl: null,
+  thinkingLive: [],
   toolCards: new Map(),
   permissionQueue: [],
   currentPermission: null,
@@ -377,6 +378,13 @@ function appendMarkdown(text) {
   return md;
 }
 
+/** 思考计时用的简短耗时：不足 10 秒保留一位小数。 */
+function formatElapsed(ms) {
+  const seconds = Number(ms) / 1000;
+  if (!Number.isFinite(seconds) || seconds < 0) return '0 秒';
+  return seconds < 10 ? `${seconds.toFixed(1)} 秒` : formatDuration(ms);
+}
+
 function appendThinking(text) {
   const details = document.createElement('details');
   details.className = 'thinking';
@@ -391,6 +399,84 @@ function appendThinking(text) {
   wrap.appendChild(details);
   appendEl(wrap);
   return details;
+}
+
+/** 思考开始时先插一个带计时的展开块，边想边显示。 */
+function beginThinking(index) {
+  const details = document.createElement('details');
+  details.className = 'thinking live';
+  details.open = true;
+  const summary = document.createElement('summary');
+  const body = document.createElement('div');
+  body.className = 'thinking-body';
+  details.append(summary, body);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant';
+  wrap.appendChild(details);
+  appendEl(wrap);
+
+  const entry = {
+    details,
+    summary,
+    body,
+    index,
+    startedAt: performance.now(),
+    stoppedAt: 0,
+    timer: null,
+  };
+  const tick = () => {
+    const elapsed = (entry.stoppedAt || performance.now()) - entry.startedAt;
+    summary.textContent = `思考中… ${formatElapsed(elapsed)}`;
+  };
+  tick();
+  entry.timer = setInterval(tick, 200);
+  state.thinkingLive.push(entry);
+  return entry;
+}
+
+function stopThinkingTimer(entry) {
+  if (!entry || entry.stoppedAt) return;
+  if (entry.timer) {
+    clearInterval(entry.timer);
+    entry.timer = null;
+  }
+  entry.stoppedAt = performance.now();
+  entry.details.classList.remove('live');
+  entry.summary.textContent = `思考过程 · 用时 ${formatElapsed(entry.stoppedAt - entry.startedAt)}`;
+}
+
+function endThinking(index) {
+  const live = state.thinkingLive.filter((entry) => !entry.stoppedAt);
+  if (live.length === 0) return;
+  // 只结束对应的那个内容块，避免把文字块的 stop 误算到思考上
+  if (index == null) {
+    stopThinkingTimer(live[live.length - 1]);
+    return;
+  }
+  const entry = live.find((item) => item.index === index);
+  if (entry) stopThinkingTimer(entry);
+}
+
+/** 完整消息到达后，用它替换刚才流式的思考块。 */
+function claimThinking(text) {
+  const matched = state.thinkingLive.findIndex(
+    (entry) => entry.body.textContent.trim() === text.trim()
+  );
+  const [entry] = state.thinkingLive.splice(matched >= 0 ? matched : 0, 1);
+  if (!entry) return false;
+  stopThinkingTimer(entry);
+  entry.body.textContent = text;
+  return true;
+}
+
+/** 一轮结束时收尾，避免计时器残留。 */
+function flushThinking() {
+  for (const entry of state.thinkingLive) {
+    stopThinkingTimer(entry);
+    if (!entry.body.textContent.trim()) entry.details.parentElement?.remove();
+  }
+  state.thinkingLive = [];
 }
 
 function appendToolUse(block) {
@@ -503,6 +589,26 @@ function startStreaming() {
 function handleStreamEvent(message) {
   const event = message.event;
   if (!event) return;
+  // 子代理的思考不混进主对话
+  const isSubagent = Boolean(message.parent_tool_use_id);
+  if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+    if (!isSubagent) beginThinking(event.index);
+    return;
+  }
+  if (event.type === 'content_block_delta' && event.delta?.type === 'thinking_delta') {
+    if (isSubagent) return;
+    let entry = state.thinkingLive[state.thinkingLive.length - 1];
+    if (!entry || entry.stoppedAt || (event.index != null && entry.index !== event.index)) {
+      entry = beginThinking(event.index);
+    }
+    entry.body.textContent += event.delta.thinking || '';
+    scrollToBottom();
+    return;
+  }
+  if (event.type === 'content_block_stop') {
+    if (!isSubagent) endThinking(event.index);
+    return;
+  }
   if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
     if (message.parent_tool_use_id) return;
     startStreaming();
@@ -552,7 +658,8 @@ function handleAssistant(message) {
         appendMarkdown(block.text);
       }
     } else if (block.type === 'thinking' && block.thinking) {
-      appendThinking(block.thinking);
+      const claimed = !message.parent_tool_use_id && claimThinking(block.thinking);
+      if (!claimed) appendThinking(block.thinking);
     } else if (block.type === 'tool_use') {
       appendToolUse(block);
     }
@@ -583,6 +690,7 @@ function handleUser(message) {
 }
 
 function handleResult(message) {
+  flushThinking();
   finalizeStream();
   clearInsertBadges();
   const interrupted = /interrupt|aborted/i.test(
@@ -724,6 +832,7 @@ function updateSessionTitle(title) {
 }
 
 function resetConversation() {
+  flushThinking();
   els.messages.innerHTML = `
     <div class="welcome">
       <div class="welcome-mark">✳</div>
@@ -1232,6 +1341,7 @@ async function newSession() {
 async function resumeSession(session) {
   await window.desk.closeSession();
   const dir = session.cwd || state.cwd;
+  flushThinking();
   els.messages.innerHTML = '';
   state.toolCards.clear();
   state.streamEl = null;
@@ -2057,7 +2167,11 @@ async function init() {
   window.desk.onState((payload) => {
     if (payload.status === 'starting') setRunning(true);
     if (payload.status === 'running') setRunning(true);
-    if (payload.status === 'idle') setRunning(false);
+    if (payload.status === 'idle') {
+      // 会话结束/报错时收尾，避免思考计时器一直跑
+      flushThinking();
+      setRunning(false);
+    }
     if (payload.sessionId) state.sessionId = payload.sessionId;
     if (payload.ended) {
       state.sessionActive = false;
@@ -2085,6 +2199,7 @@ async function init() {
   window.desk.onMenuExport(exportCurrentSession);
   window.desk.onMenuFind(openFindBar);
   window.desk.onError((payload) => {
+    flushThinking();
     finalizeStream();
     clearInsertBadges();
     clearPrompts();

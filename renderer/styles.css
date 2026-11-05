@@ -644,6 +644,42 @@ select:hover {
   content: '▾ ';
 }
 
+/* 正在思考时：标题高亮 + 呼吸小圆点 */
+.thinking.live summary {
+  color: var(--accent);
+}
+
+.thinking.live summary::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.75);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking.live summary::after {
+    animation: none;
+    opacity: 0.9;
+  }
+}
+
 .thinking .thinking-body {
   color: var(--muted);
   font-size: 12.5px;
