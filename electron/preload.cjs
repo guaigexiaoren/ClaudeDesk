@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 function subscribe(channel) {
   return (callback) => {
@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('desk', {
   getState: () => ipcRenderer.invoke('app:get-state'),
   saveSettings: (patch) => ipcRenderer.invoke('app:save-settings', patch),
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
+  pickAttachments: () => ipcRenderer.invoke('dialog:pick-attachments'),
+  describeFile: (path) => ipcRenderer.invoke('file:describe', { path }),
+  pathForFile: (file) => webUtils.getPathForFile(file),
   showInFolder: (target) => ipcRenderer.invoke('shell:show-in-folder', target),
   saveText: (options) => ipcRenderer.invoke('dialog:save-text', options),
 

@@ -119,12 +119,14 @@ const state = {
   lastStderrByKey: new Map(),
   running: false,
   sending: false,
+  attachments: [],
   streamEl: null,
   thinkingLive: [],
   activityStartedAt: 0,
   activityTimer: null,
   activityHideTimer: null,
   activityLabel: '',
+  activityByKey: new Map(),
   lastEventAt: 0,
   awaitingUser: false,
   replaying: false,
@@ -164,6 +166,8 @@ const els = {
   activityBar: $('activity-bar'),
   activityLabel: $('activity-label'),
   activityTime: $('activity-time'),
+  attachmentBar: $('attachment-bar'),
+  attach: $('attach'),
   input: $('input'),
   send: $('send'),
   stop: $('stop'),
@@ -293,12 +297,36 @@ function appendEl(el, force = false) {
 
 /* ---------------- 消息渲染 ---------------- */
 
-function appendUserMessage(text, steer = false, uuid = '') {
+function attachmentDataUrl(attachment) {
+  return attachment.url || `data:${attachment.mediaType};base64,${attachment.data}`;
+}
+
+function appendUserMessage(text, steer = false, uuid = '', attachments = []) {
   const wrap = document.createElement('div');
   wrap.className = 'msg user';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.textContent = text;
+  if (text) bubble.textContent = text;
+  if (attachments.length > 0) {
+    const gallery = document.createElement('div');
+    gallery.className = 'user-attachments';
+    for (const attachment of attachments) {
+      if (attachment.kind === 'image' && (attachment.data || attachment.url)) {
+        const img = document.createElement('img');
+        img.className = 'user-attachment-thumb';
+        img.src = attachmentDataUrl(attachment);
+        img.alt = attachment.name || '图片';
+        gallery.appendChild(img);
+      } else {
+        const chip = document.createElement('span');
+        chip.className = 'user-attachment-file';
+        chip.textContent = `📄 ${attachment.name || attachment.path}`;
+        chip.title = attachment.path || '';
+        gallery.appendChild(chip);
+      }
+    }
+    bubble.appendChild(gallery);
+  }
   if (steer) {
     const badge = document.createElement('span');
     badge.className = 'bubble-badge';
@@ -309,6 +337,207 @@ function appendUserMessage(text, steer = false, uuid = '') {
   if (uuid) addMessageActions(wrap, uuid);
   appendEl(wrap, true);
   return wrap;
+}
+
+/* ---------------- 附件 ---------------- */
+
+const MAX_ATTACHMENTS = 10;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function formatFileSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderAttachments() {
+  els.attachmentBar.innerHTML = '';
+  els.attachmentBar.hidden = state.attachments.length === 0;
+
+  for (const attachment of state.attachments) {
+    const item = document.createElement('div');
+    item.className = 'attachment-item';
+
+    if (attachment.kind === 'image' && (attachment.data || attachment.url)) {
+      const img = document.createElement('img');
+      img.className = 'attachment-thumb';
+      img.src = attachmentDataUrl(attachment);
+      img.alt = attachment.name || '图片';
+      item.appendChild(img);
+    } else {
+      const icon = document.createElement('span');
+      icon.className = 'attachment-file-icon';
+      icon.textContent = '📄';
+      item.appendChild(icon);
+    }
+
+    const meta = document.createElement('span');
+    meta.className = 'attachment-meta';
+    const name = document.createElement('span');
+    name.className = 'attachment-name';
+    name.textContent = attachment.name || attachment.path || '附件';
+    name.title = attachment.path || attachment.name || '';
+    const size = document.createElement('span');
+    size.className = 'attachment-size';
+    size.textContent = formatFileSize(attachment.size);
+    meta.append(name, size);
+
+    const remove = document.createElement('button');
+    remove.className = 'attachment-remove';
+    remove.textContent = '×';
+    remove.title = '移除附件';
+    remove.addEventListener('click', () => {
+      state.attachments = state.attachments.filter((entry) => entry.id !== attachment.id);
+      renderAttachments();
+    });
+
+    item.append(meta, remove);
+    els.attachmentBar.appendChild(item);
+  }
+}
+
+function addAttachment(entry) {
+  if (state.attachments.length >= MAX_ATTACHMENTS) {
+    showError(`一次最多添加 ${MAX_ATTACHMENTS} 个附件`);
+    return;
+  }
+  if (entry.kind === 'image' && (Number(entry.size) || 0) > MAX_IMAGE_BYTES) {
+    showError('图片不能超过 5MB');
+    return;
+  }
+  state.attachments.push({
+    id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    ...entry,
+  });
+  renderAttachments();
+}
+
+async function addAttachmentPaths(paths) {
+  for (const filePath of paths || []) {
+    const result = await window.desk.describeFile(filePath);
+    if (!result?.ok) {
+      showError(result?.error || '读取文件失败');
+      continue;
+    }
+    addAttachment(result);
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addAttachmentFiles(files) {
+  for (const file of files || []) {
+    if (file.type && file.type.startsWith('image/')) {
+      if (!IMAGE_TYPES.has(file.type)) {
+        showError('只支持 PNG、JPG、GIF、WebP 图片');
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        showError('图片不能超过 5MB');
+        continue;
+      }
+      try {
+        const dataUrl = await readFileAsDataUrl(file);
+        const comma = dataUrl.indexOf(',');
+        addAttachment({
+          kind: 'image',
+          name: file.name || '图片',
+          size: file.size,
+          mediaType: file.type,
+          data: comma >= 0 ? dataUrl.slice(comma + 1) : '',
+        });
+      } catch {
+        showError('读取图片失败');
+      }
+      continue;
+    }
+
+    let filePath = '';
+    try {
+      filePath = window.desk.pathForFile(file);
+    } catch {
+      filePath = '';
+    }
+    if (filePath) await addAttachmentPaths([filePath]);
+    else showError('无法获取文件路径，请点击附件按钮选择');
+  }
+}
+
+async function pickAttachments() {
+  const result = await window.desk.pickAttachments();
+  if (result?.ok && Array.isArray(result.paths) && result.paths.length > 0) {
+    await addAttachmentPaths(result.paths);
+  }
+}
+
+function buildMessageContent(text, attachments) {
+  const blocks = [];
+  if (text) blocks.push({ type: 'text', text });
+  for (const attachment of attachments) {
+    if (attachment.kind === 'image' && attachment.data) {
+      blocks.push({
+        type: 'image',
+        source: { type: 'base64', media_type: attachment.mediaType, data: attachment.data },
+      });
+    }
+  }
+  const paths = attachments.filter((a) => a.kind === 'file' && a.path).map((a) => a.path);
+  if (paths.length > 0) {
+    blocks.push({
+      type: 'text',
+      text: `用户附加了以下文件，请使用 Read 工具读取：\n${paths.map((p) => `- ${p}`).join('\n')}`,
+    });
+  }
+  return blocks;
+}
+
+/** 解析历史消息里的文本/图片/文件引用。 */
+function parseUserContent(content) {
+  if (typeof content === 'string') return { text: content, attachments: [] };
+
+  const attachments = [];
+  const textParts = [];
+  for (const block of content || []) {
+    if (block.type === 'text' && block.text) {
+      const note = block.text.match(/^用户附加了以下文件，请使用 Read 工具读取：\n([\s\S]*)$/);
+      if (note) {
+        for (const line of note[1].split('\n')) {
+          const match = line.match(/^-\s+(.+)$/);
+          if (match) {
+            const filePath = match[1].trim();
+            attachments.push({
+              kind: 'file',
+              path: filePath,
+              name: filePath.split(/[\\/]/).pop() || filePath,
+            });
+          }
+        }
+      } else {
+        textParts.push(block.text);
+      }
+    } else if (block.type === 'image') {
+      if (block.source?.type === 'base64') {
+        attachments.push({
+          kind: 'image',
+          mediaType: block.source.media_type,
+          data: block.source.data,
+          name: '图片',
+        });
+      } else if (block.source?.type === 'url') {
+        attachments.push({ kind: 'image', url: block.source.url, name: '图片' });
+      }
+    }
+  }
+  return { text: textParts.join('\n'), attachments };
 }
 
 function addMessageActions(wrap, uuid) {
@@ -790,7 +1019,10 @@ function handleSessionEvent(key, message) {
     registerSessionKey(key, message.session_id);
   }
   updateSessionStatusFromEvent(key, message);
-  if (key !== state.activeKey) return;
+  if (key !== state.activeKey) {
+    trackBackgroundActivity(key, message);
+    return;
+  }
   // 切回正在运行的会话时，历史还没画完，先排队
   if (state.replaying) {
     state.pendingEvents.push(message);
@@ -805,6 +1037,7 @@ function handleSessionState(key, payload) {
   if (key !== state.activeKey) {
     if (payload.ended) {
       state.startedKeys.delete(key);
+      state.activityByKey.delete(key);
       if (state.sessionStatus.get(key) === 'working') setSessionStatus(key, 'error');
     }
     return;
@@ -830,6 +1063,7 @@ function handleSessionState(key, payload) {
 
 function handleSessionError(key, text) {
   state.startedKeys.delete(key);
+  state.activityByKey.delete(key);
   if (key !== state.activeKey) {
     setSessionStatus(key, 'error');
     return;
@@ -907,6 +1141,7 @@ function setActivity(label, startedAt = performance.now()) {
   state.activityLabel = label;
   state.activityStartedAt = startedAt;
   state.lastEventAt = Date.now();
+  if (state.activeKey) state.activityByKey.set(state.activeKey, { label, startedAt });
   clearActivityState();
   els.activityBar.hidden = false;
   updateActivityTime();
@@ -922,6 +1157,7 @@ function finishActivity(label, kind = 'done') {
   }
   state.activityStartedAt = 0;
   state.activityLabel = label;
+  if (state.activeKey) state.activityByKey.delete(state.activeKey);
   clearActivityState();
   els.activityBar.classList.add(kind);
   els.activityBar.hidden = false;
@@ -1018,6 +1254,7 @@ function updateSessionStatusFromEvent(key, message) {
       setSessionStatus(key, 'working');
       break;
     case 'result': {
+      state.activityByKey.delete(key);
       const interrupted = /interrupt|aborted/i.test(
         [message.result, ...(Array.isArray(message.errors) ? message.errors : [])]
           .filter(Boolean)
@@ -1036,6 +1273,41 @@ function updateSessionStatusFromEvent(key, message) {
     default:
       break;
   }
+}
+
+/** 后台会话不渲染，但要记录它当前的动作用于切换回来时恢复计时。 */
+function trackBackgroundActivity(key, message) {
+  if (message.type === 'stream_event') {
+    const event = message.event;
+    if (event?.type === 'content_block_start') {
+      if (event.content_block?.type === 'thinking') rememberActivity(key, '正在思考…');
+      else if (event.content_block?.type === 'text') rememberActivity(key, '正在回复…');
+    }
+    return;
+  }
+  if (message.type === 'assistant') {
+    const blocks = message.message?.content || [];
+    const tool = blocks.filter((block) => block.type === 'tool_use').pop();
+    if (tool) rememberActivity(key, `正在运行 ${tool.name}…`);
+    return;
+  }
+  if (message.type === 'user') {
+    rememberActivity(key, '等待模型响应…');
+    return;
+  }
+  if (message.type === 'tool_progress') {
+    const seconds = Number(message.elapsed_time_seconds) || 0;
+    rememberActivity(
+      key,
+      `正在运行 ${message.tool_name || '工具'}…`,
+      performance.now() - seconds * 1000
+    );
+  }
+}
+
+function rememberActivity(key, label, startedAt = performance.now()) {
+  if (!key) return;
+  state.activityByKey.set(key, { label, startedAt });
 }
 
 function setRunning(running) {
@@ -1130,6 +1402,8 @@ function resetConversation() {
   state.replaying = false;
   state.pendingEvents = [];
   state.commands = [];
+  state.attachments = [];
+  renderAttachments();
   clearActivity();
   hideSlashPalette();
   updateSessionTitle('');
@@ -1640,6 +1914,7 @@ async function closeSessionBackend(sessionId) {
   state.keyTitles.delete(key);
   state.commandsByKey.delete(key);
   state.lastStderrByKey.delete(key);
+  state.activityByKey.delete(key);
   clearPrompts(key);
   if (state.activeKey === key) {
     state.activeKey = null;
@@ -1671,9 +1946,15 @@ async function resumeSession(session) {
   state.toolCards.clear();
   state.streamEl = null;
   state.commands = state.commandsByKey.get(key) || [];
+  state.attachments = [];
+  renderAttachments();
   if (status === 'done' || status === 'error') setSessionStatus(key, null);
   setRunning(busy);
-  if (busy) setActivity('正在工作…');
+  if (busy) {
+    const activity = state.activityByKey.get(key);
+    if (activity) setActivity(activity.label, activity.startedAt);
+    else setActivity('正在工作…');
+  }
   if (dir) setCwd(dir, true);
   updateSessionTitle(session.title);
 
@@ -1689,11 +1970,10 @@ async function resumeSession(session) {
           if (typeof content === 'string') {
             appendUserMessage(content, false, item.uuid);
           } else if (Array.isArray(content)) {
-            const text = content
-              .filter((block) => block.type === 'text' && block.text)
-              .map((block) => block.text)
-              .join('\n');
-            if (text) appendUserMessage(text, false, item.uuid);
+            const parsed = parseUserContent(content);
+            if (parsed.text || parsed.attachments.length > 0) {
+              appendUserMessage(parsed.text, false, item.uuid, parsed.attachments);
+            }
             handleUser(payload);
           } else {
             handleUser(payload);
@@ -2394,7 +2674,8 @@ async function ensureSession() {
 async function sendMessage() {
   if (state.sending) return;
   const text = els.input.value.trim();
-  if (!text) return;
+  const attachments = state.attachments.slice();
+  if (!text && attachments.length === 0) return;
 
   state.sending = true;
   try {
@@ -2403,8 +2684,11 @@ async function sendMessage() {
     const ready = await ensureSession();
     if (!ready) return;
 
-    const bubble = appendUserMessage(text, steer);
+    const content = buildMessageContent(text, attachments);
+    const bubble = appendUserMessage(text, steer, '', attachments);
     els.input.value = '';
+    state.attachments = [];
+    renderAttachments();
     autosize();
     hideSlashPalette();
     setRunning(true);
@@ -2412,7 +2696,7 @@ async function sendMessage() {
     state.awaitingUser = false;
     setActivity('等待模型响应…');
 
-    const result = await window.desk.send(text, { key: state.activeKey, steer });
+    const result = await window.desk.send(text, { key: state.activeKey, steer, content });
     if (!result?.ok) {
       setRunning(false);
       finishActivity('发送失败', 'error');
@@ -2504,6 +2788,27 @@ async function init() {
     autosize();
     updateSlashPalette();
   });
+  els.attach.addEventListener('click', pickAttachments);
+  els.input.addEventListener('paste', (event) => {
+    const files = Array.from(event.clipboardData?.files || []).filter((file) =>
+      String(file.type || '').startsWith('image/')
+    );
+    if (files.length === 0) return;
+    event.preventDefault();
+    addAttachmentFiles(files);
+  });
+  for (const target of [els.messages, $('composer')]) {
+    target.addEventListener('dragover', (event) => {
+      if (!event.dataTransfer?.types?.includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    });
+    target.addEventListener('drop', (event) => {
+      if (!event.dataTransfer?.files?.length) return;
+      event.preventDefault();
+      addAttachmentFiles(Array.from(event.dataTransfer.files));
+    });
+  }
   els.input.addEventListener('keydown', (event) => {
     if (!els.slashPalette.hidden) {
       if (event.key === 'ArrowDown') {

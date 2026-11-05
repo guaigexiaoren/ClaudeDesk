@@ -819,6 +819,41 @@ function registerIpc() {
   );
 
   ipcMain.handle(
+    'dialog:pick-attachments',
+    safe(async () => {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: '选择图片或文件',
+        properties: ['openFile', 'multiSelections'],
+      });
+      return { ok: true, paths: result.canceled ? [] : result.filePaths };
+    })
+  );
+
+  ipcMain.handle(
+    'file:describe',
+    safe(async ({ path: target } = {}) => {
+      if (!target) return { ok: false, error: '缺少文件路径' };
+      const stat = await fs.promises.stat(target);
+      const name = path.basename(target);
+      const ext = path.extname(target).toLowerCase();
+      const imageTypes = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+      };
+      const mediaType = imageTypes[ext];
+      if (mediaType) {
+        if (stat.size > 5 * 1024 * 1024) return { ok: false, error: '图片不能超过 5MB' };
+        const data = (await fs.promises.readFile(target)).toString('base64');
+        return { ok: true, kind: 'image', path: target, name, size: stat.size, mediaType, data };
+      }
+      return { ok: true, kind: 'file', path: target, name, size: stat.size };
+    })
+  );
+
+  ipcMain.handle(
     'shell:show-in-folder',
     safe(async (target) => {
       if (target) shell.showItemInFolder(target);
@@ -1031,11 +1066,11 @@ function registerIpc() {
 
   ipcMain.handle(
     'session:send',
-    safe(async ({ key, text, steer } = {}) => {
+    safe(async ({ key, text, content, steer } = {}) => {
       const manager = getSessionManager(key);
       if (!manager) return { ok: false, error: '会话尚未启动' };
       focusedKey = key;
-      return manager.send(text, { priority: steer ? 'next' : undefined });
+      return manager.send(content ?? text, { priority: steer ? 'next' : undefined });
     })
   );
 

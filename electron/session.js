@@ -173,13 +173,17 @@ class SessionManager extends EventEmitter {
     }
   }
 
-  send(text, options = {}) {
+  send(content, options = {}) {
     if (!this.queue || !this.query) throw new Error('会话尚未启动');
-    if (!text || !text.trim()) return { ok: false };
+    const hasContent =
+      typeof content === 'string'
+        ? content.trim().length > 0
+        : Array.isArray(content) && content.length > 0;
+    if (!hasContent) return { ok: false };
 
     const message = {
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       uuid: randomUUID(),
       origin: { kind: 'human' },
