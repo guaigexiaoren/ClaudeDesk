@@ -120,6 +120,12 @@ const state = {
   modeByKey: new Map(),
   startingKeys: new Map(),
   sessionsRequest: 0,
+  sessionsInFlight: null,
+  sessionsFetchedAt: 0,
+  historyCache: new Map(),
+  historyView: null,
+  renderTarget: null,
+  compacting: false,
   lastStderrByKey: new Map(),
   running: false,
   sending: false,
@@ -321,6 +327,8 @@ function toolSummary(name, input) {
 }
 
 function scrollToBottom(force = false) {
+  // 回放历史时逐条滚动会触发大量布局计算，等整批渲染完再滚一次
+  if (state.renderTarget || state.replaying) return;
   const el = els.messages;
   const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
   if (force || nearBottom) el.scrollTop = el.scrollHeight;
@@ -332,6 +340,11 @@ function removeWelcome() {
 }
 
 function appendEl(el, force = false) {
+  // 回放时先写进 DocumentFragment，整批插一次 DOM
+  if (state.renderTarget) {
+    state.renderTarget.appendChild(el);
+    return el;
+  }
   removeWelcome();
   els.messages.appendChild(el);
   scrollToBottom(force);
@@ -638,7 +651,7 @@ async function forkFromMessage(uuid) {
     return;
   }
 
-  await refreshSessions();
+  await refreshSessions(true);
   await resumeSession({
     sessionId: result.sessionId,
     cwd: state.cwd,
@@ -893,6 +906,32 @@ function appendNotice(text) {
   appendEl(el);
 }
 
+function formatTokenCount(value) {
+  const num = Number(value) || 0;
+  if (num >= 10000) return `${(num / 10000).toFixed(1).replace(/\.0$/, '')}万`;
+  return num.toLocaleString('zh-CN');
+}
+
+/** 压缩提示：实时事件带 token 数；历史记录里 SDK 丢掉了这些元信息，只能提示发生过压缩。 */
+function appendCompactNotice(meta) {
+  const parts = [];
+  if (!meta) {
+    parts.push('上下文已压缩');
+  } else {
+    parts.push(`上下文已压缩（${meta.trigger === 'manual' ? '手动' : '自动'}）`);
+    if (typeof meta.pre_tokens === 'number' && typeof meta.post_tokens === 'number') {
+      parts.push(`${formatTokenCount(meta.pre_tokens)} → ${formatTokenCount(meta.post_tokens)} tokens`);
+    }
+    if (typeof meta.duration_ms === 'number' && meta.duration_ms > 0) {
+      parts.push(`用时 ${formatDuration(meta.duration_ms)}`);
+    }
+  }
+  const el = document.createElement('div');
+  el.className = 'msg assistant turn-stats compact-notice';
+  el.textContent = parts.join(' · ');
+  appendEl(el);
+}
+
 /* ---------------- 流式输出 ---------------- */
 
 function startStreaming() {
@@ -1033,6 +1072,7 @@ function handleResult(message) {
   finalizeStream();
   clearInsertBadges();
   state.awaitingUser = false;
+  state.compacting = false;
   const interrupted = state.interruptRequested;
   state.interruptRequested = false;
   clearPrompts(state.activeKey);
@@ -1055,7 +1095,7 @@ function handleResult(message) {
 
   // 新会话的第一轮结束后它才会出现在历史列表里，这里补一次刷新
   if (state.sessionId && !state.sessions.some((item) => item.sessionId === state.sessionId)) {
-    refreshSessions();
+    refreshSessions(true);
   }
 }
 
@@ -1079,14 +1119,36 @@ function handleSystem(message) {
     }
     state.terminalCommands = new Set(message.terminal_slash_commands || []);
     const commands = (message.slash_commands || []).map((name) => ({ name, description: '' }));
+    // 保证 /compact 一定能在斜杠面板里找到
+    if (!commands.some((cmd) => cmd.name === 'compact')) {
+      commands.push({ name: 'compact', description: '' });
+    }
     if (state.activeKey) state.commandsByKey.set(state.activeKey, commands);
     if (state.commands.length === 0) state.commands = commands;
     // 新会话第一次 init 时还没进入历史列表，立刻刷新一次并高亮当前会话
     if (!state.sessions.some((session) => session.sessionId === message.session_id)) {
-      refreshSessions();
+      refreshSessions(true);
     }
   } else if (message.subtype === 'permission_denied') {
     appendNotice(`已自动拒绝工具调用：${message.tool_name}`);
+  } else if (message.subtype === 'status') {
+    if (message.compact_result === 'failed') {
+      state.compacting = false;
+      showError(message.compact_error || '上下文压缩失败');
+      finishActivity('上下文压缩失败', 'error');
+    } else if (message.compact_result === 'success' && state.compacting) {
+      state.compacting = false;
+      finishActivity('上下文已压缩', 'done');
+    } else if (message.status === 'compacting') {
+      state.compacting = true;
+      setActivity('正在压缩上下文…');
+    }
+  } else if (message.subtype === 'compact_boundary') {
+    if (state.compacting) {
+      state.compacting = false;
+      finishActivity('上下文已压缩', 'done');
+    }
+    appendCompactNotice(message.compact_metadata || {});
   } else if (message.subtype === 'local_command_output') {
     appendMarkdown(message.content || '');
   }
@@ -1095,6 +1157,16 @@ function handleSystem(message) {
 /** 所有会话的事件都从这里进来：后台会话只更新状态灯，不渲染到当前对话。 */
 function handleSessionEvent(key, message) {
   if (!key || !message || state.closedKeys.has(key)) return;
+  // 会话有新内容后历史缓存就过期了，切回来时重新读取
+  if (
+    message.type === 'assistant' ||
+    message.type === 'user' ||
+    message.type === 'result' ||
+    message.type === 'stream_event' ||
+    (message.type === 'system' && message.subtype === 'compact_boundary')
+  ) {
+    dropHistory(message.session_id || state.keyToSession.get(key));
+  }
   if (message.type === 'system' && message.subtype === 'init') {
     registerSessionKey(key, message.session_id);
     // 后台会话的 init 不会进入 handleSystem，这里也记录一份元信息
@@ -1242,7 +1314,7 @@ function updateActivityTime() {
 
 /** 显示当前正在做什么，并开始计时。 */
 function setActivity(label, startedAt = performance.now()) {
-  if (state.replaying) return;
+  if (state.replaying || state.renderTarget) return;
   if (state.activityHideTimer) {
     clearTimeout(state.activityHideTimer);
     state.activityHideTimer = null;
@@ -1259,7 +1331,7 @@ function setActivity(label, startedAt = performance.now()) {
 
 /** 本轮结束：显示最终结果，几秒后自动隐藏。kind: done / stopped / error */
 function finishActivity(label, kind = 'done') {
-  if (state.replaying) return;
+  if (state.replaying || state.renderTarget) return;
   if (state.activityTimer) {
     clearInterval(state.activityTimer);
     state.activityTimer = null;
@@ -1329,7 +1401,7 @@ function registerSessionKey(key, sessionId) {
   state.keyToSession.set(key, sessionId);
   state.sessionKeys.set(sessionId, key);
   applySessionStatusToDom(sessionId);
-  if (!state.sessions.some((session) => session.sessionId === sessionId)) refreshSessions();
+  if (!state.sessions.some((session) => session.sessionId === sessionId)) refreshSessions(true);
 }
 
 function sessionTitleFor(key) {
@@ -1376,7 +1448,7 @@ function updateSessionStatusFromEvent(key, message) {
       // 新会话第一次跑完后才会出现在会话列表里，后台会话也要补一次刷新
       const sessionId = state.keyToSession.get(key);
       if (sessionId && !state.sessions.some((item) => item.sessionId === sessionId)) {
-        refreshSessions();
+        refreshSessions(true);
       }
       break;
     }
@@ -1445,15 +1517,14 @@ function clearError() {
   state.errorShown = false;
 }
 
-function setCwd(dir, persist = true) {
+function setCwd(dir, persist = true, refresh = persist) {
+  const changed = (dir || '') !== state.cwd;
   state.cwd = dir || '';
   els.settingsCwd.textContent = dir || '未选择';
   if (!state.terminalStarted) state.terminalCwd = state.cwd;
   updateTerminalCwd();
-  if (persist) {
-    window.desk.saveSettings({ cwd: dir });
-    refreshSessions();
-  }
+  if (persist && changed) window.desk.saveSettings({ cwd: dir });
+  if (refresh) refreshSessions(true);
 }
 
 /* ---------------- 权限模式 ---------------- */
@@ -1562,6 +1633,9 @@ function resetConversation() {
   state.awaitingUser = false;
   state.replaying = false;
   state.pendingEvents = [];
+  state.historyView = null;
+  state.renderTarget = null;
+  state.compacting = false;
   state.commands = [];
   state.attachments = [];
   state.mcpStatus = {};
@@ -1577,23 +1651,39 @@ function resetConversation() {
 
 /* ---------------- 会话操作 ---------------- */
 
-async function refreshSessions() {
-  const token = ++state.sessionsRequest;
-  const result = await window.desk.listSessions({});
-  // 后台会话会并发触发刷新，只采用最后一次请求的结果
-  if (token !== state.sessionsRequest) return;
-  if (!result?.ok) return;
-  const titles = state.settings.sessionTitles || {};
-  state.sessions = (result.sessions || []).map((session) => ({
-    ...session,
-    title: titles[session.sessionId] || session.title,
-  }));
-  renderSessionGroups();
-  renderTrash();
+const SESSIONS_CACHE_MS = 1500;
 
-  const current = state.sessions.find((session) => session.sessionId === state.sessionId);
-  if (current?.title && !els.sessionTitle.dataset.custom) {
-    els.sessionTitle.textContent = current.title;
+async function refreshSessions(force = false) {
+  // 一次切换会触发多次刷新，合并成同一个请求，短时间内直接复用结果
+  if (!force) {
+    if (state.sessionsInFlight) return state.sessionsInFlight;
+    if (Date.now() - state.sessionsFetchedAt < SESSIONS_CACHE_MS) return;
+  }
+  const token = ++state.sessionsRequest;
+  const promise = (async () => {
+    const result = await window.desk.listSessions({});
+    // 后台会话会并发触发刷新，只采用最后一次请求的结果
+    if (token !== state.sessionsRequest) return;
+    if (!result?.ok) return;
+    state.sessionsFetchedAt = Date.now();
+    const titles = state.settings.sessionTitles || {};
+    state.sessions = (result.sessions || []).map((session) => ({
+      ...session,
+      title: titles[session.sessionId] || session.title,
+    }));
+    renderSessionGroups();
+    renderTrash();
+
+    const current = state.sessions.find((session) => session.sessionId === state.sessionId);
+    if (current?.title && !els.sessionTitle.dataset.custom) {
+      els.sessionTitle.textContent = current.title;
+    }
+  })();
+  if (!force) state.sessionsInFlight = promise;
+  try {
+    await promise;
+  } finally {
+    if (state.sessionsInFlight === promise) state.sessionsInFlight = null;
   }
 }
 
@@ -1878,7 +1968,7 @@ function moveGroupToTrash(group) {
 function restoreFromTrash(sessionId) {
   state.settings.trash = (state.settings.trash || []).filter((item) => item.sessionId !== sessionId);
   window.desk.saveSettings({ trash: state.settings.trash });
-  refreshSessions();
+  refreshSessions(true);
 }
 
 async function deleteForever(item) {
@@ -2088,6 +2178,7 @@ async function closeSessionBackend(sessionId) {
   state.modeByKey.delete(key);
   state.lastStderrByKey.delete(key);
   state.activityByKey.delete(key);
+  dropHistory(sessionId);
   clearPrompts(key);
   if (state.activeKey === key) {
     state.activeKey = null;
@@ -2095,6 +2186,137 @@ async function closeSessionBackend(sessionId) {
     setRunning(false);
   }
   await window.desk.closeSession({ key });
+}
+
+const HISTORY_PAGE = 50;
+const HISTORY_CACHE_MAX = 5;
+
+function cacheHistory(sessionId, messages) {
+  if (!sessionId) return;
+  // 重新插入一次，维持 Map 的 LRU 顺序
+  state.historyCache.delete(sessionId);
+  state.historyCache.set(sessionId, messages);
+  while (state.historyCache.size > HISTORY_CACHE_MAX) {
+    state.historyCache.delete(state.historyCache.keys().next().value);
+  }
+}
+
+function dropHistory(sessionId) {
+  if (sessionId) state.historyCache.delete(sessionId);
+}
+
+/** 是否是一轮对话的开头（用户文字消息，而不是工具结果）。 */
+function isUserTurnStart(item) {
+  if (!item || item.type !== 'user' || item.parent_tool_use_id) return false;
+  const content = item.message?.content;
+  if (!Array.isArray(content)) return true;
+  return content.some((block) => block?.type !== 'tool_result');
+}
+
+/** 从目标位置往回找，尽量从完整的一轮开始显示；回退距离有上限，避免长回合把整个历史都画出来。 */
+function historyStartIndex(messages, wanted) {
+  const floor = Math.max(0, wanted - Math.floor(HISTORY_PAGE / 2));
+  let index = Math.max(0, Math.min(wanted, messages.length));
+  while (index > floor && index < messages.length && !isUserTurnStart(messages[index])) {
+    index--;
+  }
+  return index;
+}
+
+function renderHistoryRange(messages, sessionId, from, to, renderedUuids) {
+  for (let i = from; i < to; i += 1) {
+    const item = messages[i];
+    if (!item) continue;
+    if (item.type === 'system') {
+      // 历史里的系统消息目前只会是压缩边界，SDK 没有保留 subtype 和 token 数
+      appendCompactNotice(null);
+      continue;
+    }
+    if (item.parent_tool_use_id) continue;
+    if (item.uuid && renderedUuids) renderedUuids.add(item.uuid);
+
+    const payload = { ...item, session_id: sessionId };
+    if (item.type === 'user') {
+      const content = item.message?.content;
+      if (typeof content === 'string') {
+        appendUserMessage(content, false, item.uuid);
+      } else if (Array.isArray(content)) {
+        const parsed = parseUserContent(content);
+        if (parsed.text || parsed.attachments.length > 0) {
+          appendUserMessage(parsed.text, false, item.uuid, parsed.attachments);
+        }
+        handleUser(payload);
+      } else {
+        handleUser(payload);
+      }
+    } else if (item.type === 'assistant') {
+      handleAssistant(payload);
+    }
+  }
+}
+
+function updateHistoryLoader() {
+  const view = state.historyView;
+  let loader = els.messages.querySelector('.history-loader');
+  if (!view || view.start <= 0) {
+    if (loader) loader.remove();
+    return;
+  }
+  if (!loader) {
+    loader = document.createElement('button');
+    loader.className = 'history-loader';
+    loader.addEventListener('click', loadEarlierHistory);
+  }
+  loader.textContent = `加载更早的 ${Math.min(HISTORY_PAGE, view.start)} 条`;
+  els.messages.prepend(loader);
+}
+
+function loadEarlierHistory() {
+  const view = state.historyView;
+  if (!view || view.start <= 0) return;
+
+  const from = historyStartIndex(view.messages, Math.max(0, view.start - HISTORY_PAGE));
+  if (from >= view.start) return;
+
+  const previousHeight = els.messages.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  state.renderTarget = fragment;
+  try {
+    renderHistoryRange(view.messages, view.sessionId, from, view.start);
+  } finally {
+    state.renderTarget = null;
+  }
+
+  els.messages.insertBefore(fragment, els.messages.firstChild);
+  view.start = from;
+  // 插入后补回高度差，视口停在原来的位置
+  els.messages.scrollTop += els.messages.scrollHeight - previousHeight;
+  updateHistoryLoader();
+}
+
+function showSessionLoading() {
+  const el = document.createElement('div');
+  el.className = 'session-loading';
+  el.textContent = '正在加载会话…';
+  els.messages.appendChild(el);
+}
+
+/** 只渲染最近 HISTORY_PAGE 条，更早的通过顶部按钮按需追加。 */
+function renderHistoryWindow(messages, sessionId, renderedUuids) {
+  const start = historyStartIndex(messages, Math.max(0, messages.length - HISTORY_PAGE));
+  const fragment = document.createDocumentFragment();
+  state.renderTarget = fragment;
+  try {
+    renderHistoryRange(messages, sessionId, start, messages.length, renderedUuids);
+  } finally {
+    state.renderTarget = null;
+  }
+  els.messages.innerHTML = '';
+  els.messages.appendChild(fragment);
+  state.historyView = { sessionId, messages, start };
+  updateHistoryLoader();
+  // 先把视口放到最新消息，不用等后面的 SDK 恢复
+  els.messages.scrollTop = els.messages.scrollHeight;
 }
 
 async function resumeSession(session) {
@@ -2122,6 +2344,7 @@ async function resumeSession(session) {
   flushThinking();
   clearActivity();
   els.messages.innerHTML = '';
+  state.historyView = null;
   state.toolCards.clear();
   state.streamEl = null;
   state.commands = state.commandsByKey.get(key) || [];
@@ -2134,7 +2357,7 @@ async function resumeSession(session) {
     if (activity) setActivity(activity.label, activity.startedAt);
     else setActivity('正在工作…');
   }
-  if (dir) setCwd(dir, true);
+  if (dir) setCwd(dir, true, false);
   updateSessionTitle(session.title);
   renderSessionGroups();
 
@@ -2150,37 +2373,30 @@ async function resumeSession(session) {
   state.replaying = true;
   const renderedUuids = new Set();
   try {
-    const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
-    // 快速连续切换时，只让最后一次切换渲染历史
-    if (token !== state.switchToken) return;
-    if (history && history.ok === false) {
-      showError(history.error || '读取会话历史失败');
-    }
-    if (history?.ok && Array.isArray(history.messages)) {
-      for (const item of history.messages) {
-        if (item.parent_tool_use_id) continue;
-        if (item.uuid) renderedUuids.add(item.uuid);
-        const payload = { ...item, session_id: session.sessionId };
-        if (item.type === 'user') {
-          const content = item.message?.content;
-          if (typeof content === 'string') {
-            appendUserMessage(content, false, item.uuid);
-          } else if (Array.isArray(content)) {
-            const parsed = parseUserContent(content);
-            if (parsed.text || parsed.attachments.length > 0) {
-              appendUserMessage(parsed.text, false, item.uuid, parsed.attachments);
-            }
-            handleUser(payload);
-          } else {
-            handleUser(payload);
-          }
-        } else if (item.type === 'assistant') {
-          handleAssistant(payload);
-        }
+    let messages = state.historyCache.get(session.sessionId);
+    if (messages) {
+      // 命中缓存，重新插入以保持 LRU 顺序
+      cacheHistory(session.sessionId, messages);
+    } else {
+      showSessionLoading();
+      const history = await window.desk.getHistory({ sessionId: session.sessionId, dir });
+      // 快速连续切换时，只让最后一次切换渲染历史
+      if (token !== state.switchToken) return;
+      if (history && history.ok === false) {
+        showError(history.error || '读取会话历史失败');
       }
-      // 历史里最后一个工具调用没有结果，说明当时被中断了
-      markUnfinishedTools();
+      if (history?.ok && Array.isArray(history.messages)) {
+        messages = history.messages;
+        cacheHistory(session.sessionId, messages);
+      } else {
+        // 读取失败不缓存，下次切换时重试
+        messages = [];
+      }
     }
+
+    renderHistoryWindow(messages, session.sessionId, renderedUuids);
+    // 历史里最后一个工具调用没有结果，说明当时被中断了
+    markUnfinishedTools();
   } finally {
     if (token === state.switchToken) {
       state.replaying = false;
@@ -2198,6 +2414,8 @@ async function resumeSession(session) {
           handleEvent(message);
         }
       }
+      // 切换过程中又收到了新内容，刚缓存的历史可能已经过期
+      if (pending.length > 0) dropHistory(session.sessionId);
     }
   }
 
@@ -3011,6 +3229,8 @@ async function sendMessage() {
     }
 
     if (key !== state.activeKey) return;
+    // 新消息已经进入这个会话，历史缓存作废
+    dropHistory(state.keyToSession.get(key) || state.sessionId);
     appendUserMessage(text, steer, result.uuid || '', attachments);
     els.input.value = '';
     state.attachments = [];
@@ -3074,7 +3294,7 @@ async function init() {
   els.send.addEventListener('click', sendMessage);
   els.stop.addEventListener('click', stopCurrent);
   $('new-session').addEventListener('click', newSession);
-  $('refresh-sessions').addEventListener('click', refreshSessions);
+  $('refresh-sessions').addEventListener('click', () => refreshSessions(true));
   els.addDirectory.addEventListener('click', pickDirectoryAndOpen);
   els.sessionSearch.addEventListener('input', () => {
     state.searchQuery = els.sessionSearch.value.trim();

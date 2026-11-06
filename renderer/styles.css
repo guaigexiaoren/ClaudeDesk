@@ -909,6 +909,35 @@ select:hover {
   margin-top: 10px;
 }
 
+.history-loader {
+  display: block;
+  margin: 0 auto 18px;
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.history-loader:hover {
+  color: var(--text);
+  border-color: var(--accent-border);
+}
+
+.session-loading {
+  padding: 28px 0;
+  color: var(--faint);
+  font-size: 13px;
+  text-align: center;
+}
+
+.compact-notice {
+  color: var(--accent);
+  text-align: center;
+}
+
 .preview {
   opacity: 0.92;
 }

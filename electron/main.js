@@ -833,6 +833,46 @@ async function closeSessionManager(key) {
   return { ok: true };
 }
 
+const MAX_HISTORY_TEXT = 8000;
+
+/** 工具输出在界面上本来就只显示 8000 字，历史回传前先截断，减少传输和内存。 */
+function trimHistoryText(text) {
+  return typeof text === 'string' && text.length > MAX_HISTORY_TEXT
+    ? `${text.slice(0, MAX_HISTORY_TEXT)}\n…（已截断）`
+    : text;
+}
+
+function trimHistoryMessage(item) {
+  const content = item?.message?.content;
+  if (!Array.isArray(content)) return item;
+  let changed = false;
+  const blocks = content.map((block) => {
+    if (!block || block.type !== 'tool_result') return block;
+    if (typeof block.content === 'string') {
+      const trimmed = trimHistoryText(block.content);
+      if (trimmed === block.content) return block;
+      changed = true;
+      return { ...block, content: trimmed };
+    }
+    if (Array.isArray(block.content)) {
+      let innerChanged = false;
+      const inner = block.content.map((part) => {
+        if (part?.type !== 'text') return part;
+        const trimmed = trimHistoryText(part.text);
+        if (trimmed === part.text) return part;
+        innerChanged = true;
+        return { ...part, text: trimmed };
+      });
+      if (!innerChanged) return block;
+      changed = true;
+      return { ...block, content: inner };
+    }
+    return block;
+  });
+  if (!changed) return item;
+  return { ...item, message: { ...item.message, content: blocks } };
+}
+
 function registerIpc() {
   const safe = (handler) => async (event, ...args) => {
     try {
@@ -1010,8 +1050,15 @@ function registerIpc() {
     'session:history',
     safe(async ({ sessionId, dir }) => {
       const { getSessionMessages } = await import('@anthropic-ai/claude-agent-sdk');
-      const messages = await getSessionMessages(sessionId, { dir: dir || undefined });
-      return { ok: true, messages };
+      const messages = await getSessionMessages(sessionId, {
+        dir: dir || undefined,
+        includeSystemMessages: true,
+      });
+      // 只传完整对话和压缩标记，并截断过长的工具输出
+      const kept = messages
+        .filter((item) => item.type === 'system' || !item.parent_tool_use_id)
+        .map(trimHistoryMessage);
+      return { ok: true, messages: kept };
     })
   );
 
