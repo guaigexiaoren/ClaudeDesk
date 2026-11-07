@@ -225,6 +225,7 @@ class SessionManager extends EventEmitter {
       if (toolName === 'ExitPlanMode') {
         this.emit('plan', {
           id,
+          toolUseId: typeof opts.toolUseID === 'string' ? opts.toolUseID : '',
           toolName,
           plan: typeof input?.plan === 'string' ? input.plan : '',
           planFilePath: input?.planFilePath || '',

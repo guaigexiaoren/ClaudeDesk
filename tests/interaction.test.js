@@ -57,8 +57,9 @@ test('ExitPlanMode 批准后带回计划原文', async () => {
   });
 
   const input = { plan: '# 计划\n1. 改 A', planFilePath: 'C:/x/plan.md' };
-  const pending = session._askPermission('ExitPlanMode', input, {});
+  const pending = session._askPermission('ExitPlanMode', input, { toolUseID: 'tu-1' });
   assert.equal(request.plan, '# 计划\n1. 改 A');
+  assert.equal(request.toolUseId, 'tu-1');
 
   session.respondPlan(request.id, 'approve');
   const result = await pending;
@@ -80,6 +81,19 @@ test('ExitPlanMode 拒绝时提示继续修改', async () => {
 
   assert.equal(result.behavior, 'deny');
   assert.match(result.message, /计划/);
+});
+
+test('ExitPlanMode 没有 toolUseID 时为空字符串', async () => {
+  const session = new SessionManager();
+  let request = null;
+  session.on('plan', (payload) => {
+    request = payload;
+  });
+
+  const pending = session._askPermission('ExitPlanMode', { plan: '草案' }, {});
+  assert.equal(request.toolUseId, '');
+  session.respondPlan(request.id, 'reject');
+  await pending;
 });
 
 test('普通工具仍然走权限回调', async () => {

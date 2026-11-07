@@ -374,15 +374,23 @@ async function runPlanSmoke() {
 
   await new Promise((resolve) => setTimeout(resolve, 2500));
 
-  const started = await wc.executeJavaScript(
-    `window.desk.startSession({ key: 'smoke', cwd: ${JSON.stringify(dir)}, model: 'default', permissionMode: 'plan' })`
-  );
-  console.log('SMOKE_PLAN_START', JSON.stringify(started));
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  // 通过渲染层发消息，确保计划卡内联在当前会话，而不是后台会话
+  await wc.executeJavaScript(`(() => {
+    document.getElementById('permission-button').click();
+    const plan = document.querySelector('.permission-option[data-mode="plan"]');
+    if (plan) plan.click();
+  })()`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
 
-  await wc.executeJavaScript(
-    `window.desk.send('请先列出一个计划：把 note.txt 的内容改成 hello claude。只做计划，不要修改文件，完成后调用 ExitPlanMode 把计划提交给我确认。')`
-  );
+  const notePath = path.join(dir, 'note.txt');
+  const prompt = `请先列出一个计划：把 ${notePath} 的内容改成 hello claude。只做计划，不要修改文件，完成后调用 ExitPlanMode 把计划提交给我确认。`;
+  await wc.executeJavaScript(`(() => {
+    const input = document.getElementById('input');
+    input.value = ${JSON.stringify(prompt)};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('send').click();
+  })()`);
+  console.log('SMOKE_PLAN_SENT');
 
   const deadline = Date.now() + 120_000;
   let planText = '';
@@ -406,10 +414,13 @@ async function runPlanSmoke() {
 
     if (!approved) {
       const plan = await wc.executeJavaScript(`(() => {
-        const modal = document.getElementById('plan-modal');
-        if (!modal || modal.hidden) return null;
-        const text = document.getElementById('plan-body').textContent;
-        document.getElementById('plan-approve').click();
+        const card = document.querySelector('.plan-inline');
+        const approve = card && card.querySelector('[data-plan-action="approve"]');
+        if (!approve) return null;
+        const actions = approve.closest('.plan-inline-actions');
+        if (actions && actions.hidden) return null;
+        const text = card.querySelector('.plan-inline-body')?.textContent || '';
+        approve.click();
         return text;
       })()`);
       if (plan) {
@@ -488,30 +499,28 @@ async function runUiSmoke() {
   await wc.executeJavaScript(`document.getElementById('question-submit').click()`);
   await new Promise((resolve) => setTimeout(resolve, 300));
 
+  // 后台会话的计划请求：不弹窗、不建卡、不打断当前输入
+  await wc.executeJavaScript(`document.getElementById('input').value = '正在输入的内容'`);
   wc.send('session:plan', {
     key: 'smoke',
     request: {
       id: 'smoke-plan',
+      toolUseId: 'smoke-plan-tool',
       toolName: 'ExitPlanMode',
       plan: '# 测试计划\n\n1. 第一步\n2. 第二步',
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
-  const plan = await wc.executeJavaScript(`(() => {
-    const modal = document.getElementById('plan-modal');
-    const body = document.getElementById('plan-body');
-    return JSON.stringify({ visible: !modal.hidden, rendered: body.querySelector('h1') !== null });
-  })()`);
+  const plan = await wc.executeJavaScript(`(() => JSON.stringify({
+    modalGone: !document.getElementById('plan-modal'),
+    cards: document.querySelectorAll('.plan-inline').length,
+    inputKept: document.getElementById('input').value === '正在输入的内容',
+  }))()`);
+  await wc.executeJavaScript(`document.getElementById('input').value = ''`);
 
-  const planFeedback = await wc.executeJavaScript(`(() => {
-    document.getElementById('plan-reject').click();
-    return JSON.stringify({
-      visible: !document.getElementById('plan-feedback-wrap').hidden,
-      label: document.getElementById('plan-reject').textContent,
-    });
-  })()`);
-  await wc.executeJavaScript(`document.getElementById('plan-approve').click()`);
+  // 内联计划卡本身由 --smoke-plan（真实会话）验证
+  const planFeedback = JSON.stringify({ skipped: true, reason: 'background plan does not render' });
 
   const accent = await wc.executeJavaScript(`(async () => {
     const read = () => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();

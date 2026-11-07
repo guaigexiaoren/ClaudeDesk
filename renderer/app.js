@@ -3,7 +3,8 @@ import DOMPurify from 'dompurify';
 import 'highlight.js/styles/github-dark.css';
 import '@xterm/xterm/css/xterm.css';
 import { buildSessionGroups } from './session-groups.js';
-import { formatDuration } from './format.js';
+import { formatDuration, formatStallLabel } from './format.js';
+import { createDraftStore } from './composer-drafts.js';
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -146,9 +147,10 @@ const state = {
   permissionQueue: [],
   currentPermission: null,
   currentQuestion: null,
-  currentPlan: null,
   questionQueue: [],
-  planQueue: [],
+  pendingPlans: new Map(),
+  planCards: new Map(),
+  drafts: createDraftStore(),
   commands: [],
   terminalCommands: new Set(),
   slashItems: [],
@@ -206,12 +208,6 @@ const els = {
   questionList: $('question-list'),
   questionSubmit: $('question-submit'),
   questionSkip: $('question-skip'),
-  planModal: $('plan-modal'),
-  planBody: $('plan-body'),
-  planApprove: $('plan-approve'),
-  planReject: $('plan-reject'),
-  planFeedbackWrap: $('plan-feedback-wrap'),
-  planFeedback: $('plan-feedback'),
   slashPalette: $('slash-palette'),
   settingsModal: $('settings-modal'),
   accentSwatches: $('accent-swatches'),
@@ -806,6 +802,7 @@ function flushThinking() {
 }
 
 function appendToolUse(block) {
+  if (block?.name === 'ExitPlanMode') return appendPlanToolCard(block);
   // 同一条 tool_use 重复到达时不重复建卡
   if (block.id && state.toolCards.has(block.id)) {
     return state.toolCards.get(block.id).card;
@@ -861,6 +858,19 @@ function appendToolUse(block) {
 }
 
 function attachToolResult(toolUseId, text, isError) {
+  const planCard = Array.from(state.planCards.values()).find(
+    (record) => record.toolUseId && record.toolUseId === toolUseId
+  );
+  if (planCard) {
+    if (planCard.status === 'pending' || planCard.status === 'readonly') {
+      planCard.statusEl.textContent = isError ? '已拒绝' : '已结束';
+      planCard.statusEl.className = `plan-inline-status ${isError ? 'rejected' : 'readonly'}`;
+      planCard.actions.hidden = true;
+      planCard.feedbackWrap.hidden = true;
+    }
+    return;
+  }
+
   const entry = state.toolCards.get(toolUseId);
   if (!entry) return;
 
@@ -930,6 +940,49 @@ function appendCompactNotice(meta) {
   el.className = 'msg assistant turn-stats compact-notice';
   el.textContent = parts.join(' · ');
   appendEl(el);
+}
+
+/** 压缩摘要默认收起，展开后按 Markdown 排版，避免历史里出现一大段无格式文本。 */
+function appendCompactSummary(text) {
+  const content = text || '';
+  const details = document.createElement('details');
+  details.className = 'compact-summary';
+  const summary = document.createElement('summary');
+  summary.textContent = `上下文摘要（压缩）· 约 ${Math.max(
+    1,
+    Math.round(content.length / 1000)
+  )} 千字`;
+  const body = document.createElement('div');
+  body.className = 'markdown compact-summary-body';
+  body.innerHTML = renderMarkdown(content);
+  highlightCode(body);
+  details.append(summary, body);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant';
+  wrap.appendChild(details);
+  appendEl(wrap);
+}
+
+/** 后台任务通知等内容很长，收进折叠块，避免历史里出现一大段纯文本。 */
+function appendSystemNote(title, text) {
+  const content = text || '';
+  const details = document.createElement('details');
+  details.className = 'system-note';
+  const summary = document.createElement('summary');
+  summary.textContent = `${title} · 约 ${Math.max(
+    1,
+    Math.round(content.length / 1000)
+  )} 千字`;
+  const body = document.createElement('pre');
+  body.className = 'system-note-body';
+  body.textContent = content;
+  details.append(summary, body);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant';
+  wrap.appendChild(details);
+  appendEl(wrap);
 }
 
 /* ---------------- 流式输出 ---------------- */
@@ -1215,11 +1268,29 @@ function handleSessionState(key, payload) {
   const wasRunning = state.running;
   if (payload.status === 'starting') setRunning(true);
   if (payload.status === 'running') setRunning(true);
+  if (
+    (payload.status === 'starting' || payload.status === 'running') &&
+    !state.activityStartedAt &&
+    !state.awaitingUser &&
+    !hasPendingPlan(key)
+  ) {
+    // 没有经过 sendMessage 的启动（如恢复会话）也要有可见反馈
+    setActivity('正在处理…');
+  }
   if (payload.status === 'idle') {
     // 会话结束/报错时收尾，避免思考计时器一直跑
     flushThinking();
     setRunning(false);
-    if (state.activityLabel === '正在停止…') finishActivity('已停止生成', 'stopped');
+    if (state.activityLabel === '正在停止…') {
+      finishActivity('已停止生成', 'stopped');
+    } else if (
+      !state.awaitingUser &&
+      ['正在启动会话…', '正在恢复会话…', '正在发送…', '正在处理…'].includes(
+        state.activityLabel
+      )
+    ) {
+      clearActivity();
+    }
   }
   if (payload.sessionId) state.sessionId = payload.sessionId;
   if (payload.ended) {
@@ -1292,7 +1363,6 @@ function handleEvent(message) {
 
 /* ---------------- 状态与界面 ---------------- */
 
-const STALL_MS = 90_000;
 const ACTIVITY_HIDE_MS = 5_000;
 const ACTIVITY_STATES = ['done', 'stopped', 'error'];
 
@@ -1302,12 +1372,30 @@ function clearActivityState() {
 
 function updateActivityTime() {
   if (!state.activityStartedAt) return;
-  els.activityTime.textContent = formatElapsed(performance.now() - state.activityStartedAt);
+  const elapsed = performance.now() - state.activityStartedAt;
+  els.activityTime.textContent = formatElapsed(elapsed);
 
   let label = state.activityLabel;
-  if (state.running && !state.awaitingUser) {
+  if (!state.awaitingUser) {
     const idle = Date.now() - state.lastEventAt;
-    if (idle > STALL_MS) label = `可能已卡住：${Math.round(idle / 1000)} 秒无响应`;
+    let hint = formatStallLabel(idle);
+    if (hint) {
+      if (idle >= 120_000) {
+        const raw = state.lastStderrByKey.get(state.activeKey) || '';
+        const detail = raw.trim().split('\n').filter(Boolean).pop();
+        if (detail) hint += ` · ${detail.slice(0, 120)}`;
+      }
+      label = hint;
+    }
+    // CLI 不发 tool_progress 时，也让运行中的工具卡有时间感
+    if (state.running && state.activityLabel.startsWith('正在运行 ')) {
+      const elapsedText = formatElapsed(elapsed);
+      for (const entry of [...state.toolCards.values()].reverse()) {
+        if (entry.hasResult) continue;
+        entry.status.textContent = `运行中 · ${elapsedText}`;
+        break;
+      }
+    }
   }
   els.activityLabel.textContent = label;
 }
@@ -1434,7 +1522,8 @@ function updateSessionStatusFromEvent(key, message) {
     case 'user':
     case 'stream_event':
     case 'tool_progress':
-      setSessionStatus(key, 'working');
+      // 正在等用户审批计划时，后续消息不能把状态灯从 waiting 翻回 working
+      if (!hasPendingPlan(key)) setSessionStatus(key, 'working');
       break;
     case 'result': {
       state.activityByKey.delete(key);
@@ -1460,6 +1549,10 @@ function updateSessionStatusFromEvent(key, message) {
 /** 后台会话不渲染，但要记录它当前的动作用于切换回来时恢复计时。 */
 function trackBackgroundActivity(key, message) {
   if (message.parent_tool_use_id) return;
+  if (hasPendingPlan(key)) {
+    rememberActivity(key, '等待你审批计划…');
+    return;
+  }
   if (message.type === 'stream_event') {
     const event = message.event;
     if (event?.type === 'content_block_start') {
@@ -1608,6 +1701,7 @@ function updateSessionTitle(title) {
 }
 
 function resetConversation() {
+  saveDraft(state.activeKey);
   state.switchToken += 1;
   state.interruptRequested = false;
   if (!els.findBar.hidden) closeFindBar();
@@ -1627,6 +1721,7 @@ function resetConversation() {
     </div>`;
   state.streamEl = null;
   state.toolCards.clear();
+  state.planCards.clear();
   state.sessionId = null;
   state.sessionActive = false;
   state.activeKey = null;
@@ -1639,8 +1734,10 @@ function resetConversation() {
   state.commands = [];
   state.attachments = [];
   state.mcpStatus = {};
+  els.input.value = '';
   renderPermissionMode(state.permissionMode);
   renderAttachments();
+  autosize();
   clearActivity();
   hideSlashPalette();
   updateSessionTitle('');
@@ -2179,6 +2276,7 @@ async function closeSessionBackend(sessionId) {
   state.lastStderrByKey.delete(key);
   state.activityByKey.delete(key);
   dropHistory(sessionId);
+  dropDraft(key);
   clearPrompts(key);
   if (state.activeKey === key) {
     state.activeKey = null;
@@ -2234,6 +2332,37 @@ function renderHistoryRange(messages, sessionId, from, to, renderedUuids) {
     }
     if (item.parent_tool_use_id) continue;
     if (item.uuid && renderedUuids) renderedUuids.add(item.uuid);
+
+    // 后台任务通知通常是一大段 XML 文本，收进折叠块
+    if (item.type === 'user' && item.origin?.kind === 'task-notification') {
+      const content = item.message?.content;
+      const text =
+        typeof content === 'string'
+          ? content
+          : Array.isArray(content)
+            ? content
+                .filter((block) => block?.type === 'text')
+                .map((block) => block.text)
+                .join('\n')
+            : '';
+      if (text) appendSystemNote('后台任务通知', text);
+      continue;
+    }
+
+    // 压缩摘要是一大段纯文本，收进可展开的摘要块，不再当普通用户消息渲染
+    if (item.type === 'user' && item.isCompactSummary) {
+      const content = item.message?.content;
+      if (typeof content === 'string') {
+        appendCompactSummary(content);
+      } else if (Array.isArray(content)) {
+        const text = content
+          .filter((block) => block?.type === 'text')
+          .map((block) => block.text)
+          .join('\n');
+        if (text) appendCompactSummary(text);
+      }
+      continue;
+    }
 
     const payload = { ...item, session_id: sessionId };
     if (item.type === 'user') {
@@ -2326,6 +2455,10 @@ async function resumeSession(session) {
     return;
   }
 
+  // 切走前保存旧会话草稿；先 touch 目标，避免随后保存时把目标淘汰
+  state.drafts.get(key);
+  saveDraft(state.activeKey);
+
   const token = ++state.switchToken;
   state.closedKeys.delete(key);
   state.interruptRequested = false;
@@ -2346,10 +2479,10 @@ async function resumeSession(session) {
   els.messages.innerHTML = '';
   state.historyView = null;
   state.toolCards.clear();
+  state.planCards.clear();
   state.streamEl = null;
   state.commands = state.commandsByKey.get(key) || [];
-  state.attachments = [];
-  renderAttachments();
+  restoreDraft(key);
   if (status === 'done' || status === 'error') setSessionStatus(key, null);
   setRunning(busy);
   if (busy) {
@@ -2421,6 +2554,10 @@ async function resumeSession(session) {
 
   if (token !== state.switchToken) return;
 
+  applyPendingPlans(key);
+  recalcAwaitingUser();
+  if (hasPendingPlan(key)) setActivity('等待你审批计划…');
+
   if (state.startedKeys.has(key)) {
     const focus = await window.desk.focusSession({ key });
     // 后端已被空闲回收：清掉本地标记，下面会重新恢复
@@ -2430,6 +2567,7 @@ async function resumeSession(session) {
     }
   }
   if (!state.startedKeys.has(key)) {
+    if (!state.awaitingUser) setActivity('正在恢复会话…');
     const mode = state.modeByKey.get(key) || state.permissionMode;
     state.modeByKey.set(key, mode);
     const result = await beginSession(key, () =>
@@ -2441,10 +2579,13 @@ async function resumeSession(session) {
         permissionMode: mode,
       })
     );
-    if (!result?.ok) showError(result?.error || '恢复会话失败');
-    else {
+    if (!result?.ok) {
+      showError(result?.error || '恢复会话失败');
+      if (state.activityLabel === '正在恢复会话…') finishActivity('恢复失败', 'error');
+    } else {
       state.startedKeys.add(key);
       state.sessionActive = true;
+      if (!state.awaitingUser && state.activityLabel === '正在恢复会话…') clearActivity();
     }
   }
   scrollToBottom(true);
@@ -2456,7 +2597,12 @@ async function resumeSession(session) {
 function clearPrompts(key) {
   state.permissionQueue = state.permissionQueue.filter((entry) => entry.key !== key);
   state.questionQueue = state.questionQueue.filter((request) => request.__key !== key);
-  state.planQueue = state.planQueue.filter((request) => request.__key !== key);
+  for (const [planKey, record] of [...state.pendingPlans]) {
+    if (record.key === key) state.pendingPlans.delete(planKey);
+  }
+  for (const record of state.planCards.values()) {
+    if (record.key === key) expirePlanCard(record);
+  }
   if (state.currentPermission?.key === key) {
     state.currentPermission = null;
     els.permModal.hidden = true;
@@ -2465,16 +2611,9 @@ function clearPrompts(key) {
     state.currentQuestion = null;
     els.questionModal.hidden = true;
   }
-  if (state.currentPlan?.__key === key) {
-    state.currentPlan = null;
-    els.planModal.hidden = true;
-  }
-  if (!state.currentPermission && !state.currentQuestion && !state.currentPlan) {
-    state.awaitingUser = false;
-  }
+  recalcAwaitingUser();
   pumpPermission();
   pumpQuestions();
-  pumpPlans();
 }
 
 function enqueuePermission(key, request) {
@@ -2720,43 +2859,344 @@ async function skipQuestion() {
 
 /* ---------------- 计划审批 ---------------- */
 
-function showPlan(key, request) {
-  request.__key = key;
-  state.planQueue.push(request);
-  pumpPlans();
+function planKeyFor(key, toolUseId, requestId = '') {
+  return toolUseId ? `${key}::tool::${toolUseId}` : `${key}::req::${requestId}`;
 }
 
-function pumpPlans() {
-  if (state.currentPlan || state.planQueue.length === 0) return;
-  const request = state.planQueue.shift();
-  state.currentPlan = request;
-  const key = request.__key;
+function hasPendingPlan(key) {
+  if (!key) return false;
+  for (const record of state.pendingPlans.values()) {
+    if (record.key === key) return true;
+  }
+  return false;
+}
 
-  els.planBody.innerHTML = renderMarkdown(request.plan || '（计划内容为空）');
-  highlightCode(els.planBody);
-  els.planFeedbackWrap.hidden = true;
-  els.planFeedback.value = '';
-  els.planReject.textContent = '拒绝，继续修改';
-  setModalHeading(els.planModal, '计划待确认', key);
-  els.planModal.hidden = false;
-  els.planReject.focus();
+function recalcAwaitingUser() {
+  state.awaitingUser = Boolean(
+    state.currentPermission || state.currentQuestion || hasPendingPlan(state.activeKey)
+  );
+}
+
+function findPlanCardByText(key, plan) {
+  if (!plan) return null;
+  for (const record of state.planCards.values()) {
+    if (record.key === key && record.status === 'readonly' && record.plan === plan) {
+      return record;
+    }
+  }
+  return null;
+}
+
+function createPlanCard({
+  key,
+  planKey,
+  toolUseId,
+  plan,
+  planFilePath,
+  pendingRecord = null,
+  history = false,
+}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant plan-request';
+  wrap.dataset.planKey = planKey;
+
+  const card = document.createElement('div');
+  card.className = 'plan-inline';
+  card.dataset.planKey = planKey;
+
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'plan-inline-head';
+  head.dataset.planToggle = '';
+
+  const icon = document.createElement('span');
+  icon.className = 'plan-inline-icon';
+  icon.textContent = '✳';
+
+  const title = document.createElement('span');
+  title.className = 'plan-inline-title';
+  title.textContent = '计划';
+
+  const file = document.createElement('span');
+  file.className = 'plan-inline-file';
+  file.textContent = planFilePath || '';
+  file.title = planFilePath || '';
+
+  const statusEl = document.createElement('span');
+  statusEl.className = 'plan-inline-status';
+
+  const chevron = document.createElement('span');
+  chevron.className = 'plan-inline-chevron';
+  chevron.textContent = '▸';
+
+  head.append(icon, title, file, statusEl, chevron);
+
+  const body = document.createElement('div');
+  body.className = 'plan-inline-body markdown';
+  body.innerHTML = renderMarkdown(plan || '（计划内容为空）');
+  highlightCode(body);
+
+  const feedbackWrap = document.createElement('div');
+  feedbackWrap.className = 'plan-inline-feedback';
+  feedbackWrap.hidden = true;
+  const feedback = document.createElement('textarea');
+  feedback.rows = 3;
+  feedback.placeholder = '告诉 Claude 想怎么改（Enter 发送，Shift+Enter 换行）';
+  feedbackWrap.appendChild(feedback);
+
+  const actions = document.createElement('div');
+  actions.className = 'plan-inline-actions';
+  const rejectBtn = document.createElement('button');
+  rejectBtn.type = 'button';
+  rejectBtn.className = 'ghost-button';
+  rejectBtn.dataset.planAction = 'reject';
+  rejectBtn.textContent = '拒绝并反馈';
+  const approveBtn = document.createElement('button');
+  approveBtn.type = 'button';
+  approveBtn.className = 'primary-button';
+  approveBtn.dataset.planAction = 'approve';
+  approveBtn.textContent = '批准并执行';
+  actions.append(rejectBtn, approveBtn);
+
+  card.append(head, body, feedbackWrap, actions);
+  wrap.appendChild(card);
+
+  const record = {
+    planKey,
+    key,
+    toolUseId,
+    plan,
+    planFilePath,
+    wrap,
+    card,
+    head,
+    body,
+    statusEl,
+    chevron,
+    actions,
+    approveBtn,
+    rejectBtn,
+    feedbackWrap,
+    feedback,
+    request: null,
+    status: 'readonly',
+  };
+  state.planCards.set(planKey, record);
+
+  head.addEventListener('click', () => {
+    card.classList.toggle('open');
+    chevron.textContent = card.classList.contains('open') ? '▾' : '▸';
+  });
+
+  rejectBtn.addEventListener('click', () => {
+    if (record.status !== 'pending') return;
+    if (feedbackWrap.hidden) {
+      feedbackWrap.hidden = false;
+      rejectBtn.textContent = '拒绝并发送';
+      feedback.focus();
+      return;
+    }
+    submitPlanDecision(record, 'reject');
+  });
+
+  approveBtn.addEventListener('click', () => {
+    if (record.status === 'pending') submitPlanDecision(record, 'approve');
+  });
+
+  feedback.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      feedbackWrap.hidden = true;
+      rejectBtn.textContent = '拒绝并反馈';
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (record.status === 'pending') submitPlanDecision(record, 'reject');
+    }
+  });
+
+  if (pendingRecord) {
+    attachPlanRequest(record, pendingRecord);
+  } else if (history) {
+    statusEl.textContent = '历史计划';
+    statusEl.className = 'plan-inline-status readonly';
+    actions.hidden = true;
+    card.classList.remove('open');
+  } else {
+    // 实时计划：tool_use 先到、审批请求还没到，先展开给用户看
+    card.classList.add('open');
+    chevron.textContent = '▾';
+    actions.hidden = true;
+  }
+
+  appendEl(wrap);
+  return record;
+}
+
+function attachPlanRequest(record, pendingRecord) {
+  if (!pendingRecord || !record) return;
+  if (record.status === 'pending' && record.request?.id === pendingRecord.request?.id) return;
+  record.request = pendingRecord.request;
+  record.status = 'pending';
+  record.plan = pendingRecord.plan;
+  record.planFilePath = pendingRecord.planFilePath;
+  record.card.classList.add('open');
+  record.chevron.textContent = '▾';
+  record.statusEl.textContent = '待批准';
+  record.statusEl.className = 'plan-inline-status pending';
+  record.actions.hidden = false;
+  record.feedbackWrap.hidden = true;
+  record.rejectBtn.textContent = '拒绝并反馈';
+  record.approveBtn.disabled = false;
+  record.rejectBtn.disabled = false;
+}
+
+function appendPlanToolCard(block) {
+  const key = state.activeKey;
+  const toolUseId = block.id || '';
+  let planKey = planKeyFor(key, toolUseId);
+  let pendingRecord = toolUseId ? state.pendingPlans.get(planKey) : null;
+
+  if (!toolUseId) {
+    // 旧 CLI / 假事件没有 toolUseID：按同一会话 + 计划正文完全一致唯一匹配
+    const planText = block.input?.plan || '';
+    const matches = [...state.pendingPlans.values()].filter(
+      (record) => record.key === key && !record.toolUseId && record.plan === planText
+    );
+    if (matches.length === 1) {
+      pendingRecord = matches[0];
+      planKey = pendingRecord.planKey;
+    } else {
+      planKey = planKeyFor(key, '', block.id || 'unknown');
+    }
+  }
+
+  const existing = state.planCards.get(planKey);
+  if (existing) {
+    if (pendingRecord) attachPlanRequest(existing, pendingRecord);
+    return existing.wrap;
+  }
+
+  if (!pendingRecord && !toolUseId) {
+    const matched = findPlanCardByText(key, block.input?.plan || '');
+    if (matched) {
+      attachPlanRequest(matched, state.pendingPlans.get(matched.planKey));
+      return matched.wrap;
+    }
+  }
+
+  return createPlanCard({
+    key,
+    planKey,
+    toolUseId,
+    plan: block.input?.plan || pendingRecord?.plan || '',
+    planFilePath: block.input?.planFilePath || pendingRecord?.planFilePath || '',
+    pendingRecord,
+    history: state.replaying || Boolean(state.renderTarget),
+  });
+}
+
+function handlePlan(key, request) {
+  const toolUseId = request.toolUseId || '';
+  const planKey = planKeyFor(key, toolUseId, request.id);
+  const pendingRecord = {
+    planKey,
+    key,
+    request,
+    toolUseId,
+    plan: request.plan || '',
+    planFilePath: request.planFilePath || '',
+  };
+  state.pendingPlans.set(planKey, pendingRecord);
+
   setSessionStatus(key, 'waiting');
-  state.awaitingUser = true;
-  if (key === state.activeKey) setActivity('等待你审批计划…');
-  else rememberActivity(key, '等待你审批计划…');
+  if (key === state.activeKey) {
+    setActivity('等待你审批计划…');
+  } else {
+    rememberActivity(key, '等待你审批计划…');
+  }
+  recalcAwaitingUser();
+
+  // 后台会话或历史回放中：只登记，绝不碰当前会话的 DOM
+  if (key !== state.activeKey || state.replaying || state.renderTarget) return;
+
+  const existing = state.planCards.get(planKey);
+  if (existing) {
+    attachPlanRequest(existing, pendingRecord);
+    return;
+  }
+
+  if (!toolUseId) {
+    const matched = findPlanCardByText(key, pendingRecord.plan);
+    if (matched) {
+      state.planCards.set(planKey, matched);
+      attachPlanRequest(matched, pendingRecord);
+      return;
+    }
+  }
+
+  createPlanCard({
+    key,
+    planKey,
+    toolUseId,
+    plan: pendingRecord.plan,
+    planFilePath: pendingRecord.planFilePath,
+    pendingRecord,
+  });
 }
 
-async function respondPlan(decision) {
-  const request = state.currentPlan;
-  if (!request) return;
-  const key = request.__key;
+/** 切换会话、历史渲染完成后，把该会话所有待审批计划补成可操作卡片。 */
+function applyPendingPlans(key) {
+  if (!key || key !== state.activeKey || state.replaying) return;
+  for (const pendingRecord of [...state.pendingPlans.values()]) {
+    if (pendingRecord.key !== key) continue;
+    const existing = state.planCards.get(pendingRecord.planKey);
+    if (existing) {
+      attachPlanRequest(existing, pendingRecord);
+      continue;
+    }
+    if (!pendingRecord.toolUseId) {
+      const matched = findPlanCardByText(key, pendingRecord.plan);
+      if (matched) {
+        state.planCards.set(pendingRecord.planKey, matched);
+        attachPlanRequest(matched, pendingRecord);
+        continue;
+      }
+    }
+    createPlanCard({
+      key,
+      planKey: pendingRecord.planKey,
+      toolUseId: pendingRecord.toolUseId,
+      plan: pendingRecord.plan,
+      planFilePath: pendingRecord.planFilePath,
+      pendingRecord,
+    });
+  }
+}
 
-  const feedback = els.planFeedback.value.trim();
-  state.currentPlan = null;
-  els.planModal.hidden = true;
-  els.planFeedbackWrap.hidden = true;
-  els.planFeedback.value = '';
-  els.planReject.textContent = '拒绝，继续修改';
+function expirePlanCard(record) {
+  if (!record || record.status !== 'pending') return;
+  record.status = 'expired';
+  record.statusEl.textContent = '已失效';
+  record.statusEl.className = 'plan-inline-status expired';
+  record.actions.hidden = true;
+  record.feedbackWrap.hidden = true;
+}
+
+async function submitPlanDecision(record, decision) {
+  if (!record?.request || record.status !== 'pending') return;
+  const { key, request, planKey } = record;
+  const feedback = record.feedback.value.trim();
+
+  record.status = 'submitting';
+  record.statusEl.textContent = '提交中…';
+  record.statusEl.className = 'plan-inline-status pending';
+  record.approveBtn.disabled = true;
+  record.rejectBtn.disabled = true;
+  state.pendingPlans.delete(planKey);
+  recalcAwaitingUser();
 
   const result = await window.desk.respondPlan({
     key,
@@ -2764,14 +3204,42 @@ async function respondPlan(decision) {
     decision,
     feedback: decision === 'reject' ? feedback : undefined,
   });
-  state.awaitingUser = false;
-  if (!result?.ok) {
-    setSessionStatus(key, null);
-    if (key === state.activeKey) clearActivity();
-    showError(result?.error || '提交计划审批失败');
-    pumpPlans();
+
+  // 等待期间会话结束/被停止：保持“已失效”，不把按钮重新打开
+  if (record.status === 'expired') {
+    if (!result?.ok) showError(result?.error || '提交计划审批失败');
     return;
   }
+
+  if (!result?.ok) {
+    record.status = 'pending';
+    record.statusEl.textContent = '待批准';
+    record.statusEl.className = 'plan-inline-status pending';
+    record.approveBtn.disabled = false;
+    record.rejectBtn.disabled = false;
+    state.pendingPlans.set(planKey, {
+      planKey,
+      key,
+      request,
+      toolUseId: record.toolUseId,
+      plan: record.plan,
+      planFilePath: record.planFilePath,
+    });
+    setSessionStatus(key, 'waiting');
+    if (key === state.activeKey) setActivity('等待你审批计划…');
+    showError(result?.error || '提交计划审批失败');
+    recalcAwaitingUser();
+    return;
+  }
+
+  record.status = decision === 'approve' ? 'approved' : 'rejected';
+  record.statusEl.textContent = decision === 'approve' ? '已批准' : '已拒绝';
+  record.statusEl.className = `plan-inline-status ${
+    decision === 'approve' ? 'approved' : 'rejected'
+  }`;
+  record.actions.hidden = true;
+  record.feedbackWrap.hidden = true;
+
   if (decision === 'approve') {
     state.modeByKey.set(key, 'default');
     if (key === state.activeKey) renderPermissionMode('default');
@@ -2782,7 +3250,7 @@ async function respondPlan(decision) {
   setSessionStatus(key, 'working');
   rememberActivity(key, '等待模型响应…');
   if (key === state.activeKey) setActivity('等待模型响应…');
-  pumpPlans();
+  recalcAwaitingUser();
 }
 
 /* ---------------- 斜杠命令 ---------------- */
@@ -3140,6 +3608,41 @@ function autosize() {
   els.input.style.height = `${Math.min(els.input.scrollHeight, 220)}px`;
 }
 
+/** 按会话保存输入框草稿（文字 + 附件），切走不串台。 */
+function saveDraft(key) {
+  if (!key) return;
+  const text = els.input.value;
+  if (!text && state.attachments.length === 0) {
+    state.drafts.delete(key);
+    return;
+  }
+  state.drafts.set(key, {
+    text,
+    attachments: state.attachments.slice(),
+    start: els.input.selectionStart ?? 0,
+    end: els.input.selectionEnd ?? 0,
+  });
+}
+
+function restoreDraft(key) {
+  const draft = state.drafts.get(key);
+  els.input.value = draft?.text || '';
+  state.attachments = draft ? draft.attachments.slice() : [];
+  renderAttachments();
+  autosize();
+  if (draft) {
+    try {
+      els.input.setSelectionRange(draft.start, draft.end);
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
+
+function dropDraft(key) {
+  if (key) state.drafts.delete(key);
+}
+
 /** 同一个 key 的启动/恢复只跑一次，避免并发 resume 把刚启动的会话又重启。 */
 function beginSession(key, starter) {
   if (state.startingKeys.has(key)) return state.startingKeys.get(key);
@@ -3202,10 +3705,38 @@ async function sendMessage() {
   state.sending = true;
   try {
     clearError();
+    const sendKey = state.activeKey;
+    const prevStatus = sendKey ? state.sessionStatus.get(sendKey) : null;
+    const planWaiting = hasPendingPlan(sendKey);
+    if (sendKey && !planWaiting) setSessionStatus(sendKey, 'working');
+    if (!planWaiting) {
+      // 启动/恢复 CLI 可能有一段时间没有事件，先给用户明确反馈
+      setActivity(
+        state.sessionActive
+          ? '正在发送…'
+          : state.sessionId
+            ? '正在恢复会话…'
+            : '正在启动会话…'
+      );
+    }
+
     const ready = await ensureSession();
-    if (!ready) return;
+    if (!ready) {
+      if (sendKey) setSessionStatus(sendKey, prevStatus || null);
+      if (
+        state.activityLabel === '正在启动会话…' ||
+        state.activityLabel === '正在恢复会话…' ||
+        state.activityLabel === '正在发送…'
+      ) {
+        finishActivity('启动失败', 'error');
+      }
+      return;
+    }
     // 启动/恢复期间用户切走了会话：消息留在输入框，不要发到别的会话
-    if (viewToken !== state.switchToken) return;
+    if (viewToken !== state.switchToken) {
+      if (sendKey) setSessionStatus(sendKey, prevStatus || null);
+      return;
+    }
     const key = state.activeKey;
     if (!key) return;
 
@@ -3214,7 +3745,7 @@ async function sendMessage() {
     setRunning(true);
     state.interruptRequested = false;
     state.lastStderrByKey.delete(key);
-    state.awaitingUser = false;
+    recalcAwaitingUser();
     setActivity('等待模型响应…');
 
     const result = await window.desk.send(text, { key, steer, content });
@@ -3228,13 +3759,20 @@ async function sendMessage() {
       return;
     }
 
-    if (key !== state.activeKey) return;
-    // 新消息已经进入这个会话，历史缓存作废
+    // 新消息已经进入这个会话，历史缓存和草稿都作废
     dropHistory(state.keyToSession.get(key) || state.sessionId);
+    dropDraft(key);
+    if (key !== state.activeKey) return;
     appendUserMessage(text, steer, result.uuid || '', attachments);
-    els.input.value = '';
-    state.attachments = [];
-    renderAttachments();
+    // 发送期间用户可能又输入了新内容，只清掉本次发送的部分
+    if (els.input.value.trim() === text) els.input.value = '';
+    const sameAttachments =
+      state.attachments.length === attachments.length &&
+      state.attachments.every((item, index) => item === attachments[index]);
+    if (sameAttachments) {
+      state.attachments = [];
+      renderAttachments();
+    }
     autosize();
     hideSlashPalette();
   } finally {
@@ -3407,8 +3945,9 @@ async function init() {
       skipQuestion();
     } else if (!els.permModal.hidden) {
       answerPermission('deny');
-    } else if (!els.planModal.hidden) {
-      respondPlan('reject');
+    } else if (hasPendingPlan(state.activeKey)) {
+      // 等待计划审批时不要用 Esc 误拒，也不要误停当前回合
+      return;
     } else if (state.running) {
       stopCurrent();
     }
@@ -3420,22 +3959,6 @@ async function init() {
 
   els.questionSubmit.addEventListener('click', submitQuestion);
   els.questionSkip.addEventListener('click', skipQuestion);
-  els.planApprove.addEventListener('click', () => respondPlan('approve'));
-  els.planReject.addEventListener('click', () => {
-    if (els.planFeedbackWrap.hidden) {
-      els.planFeedbackWrap.hidden = false;
-      els.planReject.textContent = '拒绝并发送';
-      els.planFeedback.focus();
-      return;
-    }
-    respondPlan('reject');
-  });
-  els.planFeedback.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-      event.preventDefault();
-      respondPlan('reject');
-    }
-  });
 
   els.permissionButton.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -3481,7 +4004,7 @@ async function init() {
     if (!state.closedKeys.has(key)) showQuestion(key, request);
   });
   window.desk.onPlan(({ key, request }) => {
-    if (!state.closedKeys.has(key)) showPlan(key, request);
+    if (!state.closedKeys.has(key)) handlePlan(key, request);
   });
   window.desk.onCommands(({ key, commands }) => {
     if (state.closedKeys.has(key)) return;
@@ -3515,7 +4038,11 @@ async function init() {
   window.desk.onSessionReleased(({ key }) => {
     if (!key) return;
     state.startedKeys.delete(key);
-    if (state.activeKey === key) state.sessionActive = false;
+    if (state.activeKey === key) {
+      state.sessionActive = false;
+      if (!hasPendingPlan(key) && !state.awaitingUser) clearActivity();
+      setSessionStatus(key, null);
+    }
   });
   window.desk.onNewSession(newSession);
   window.desk.onPickDirectory(async () => {

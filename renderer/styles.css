@@ -938,6 +938,81 @@ select:hover {
   text-align: center;
 }
 
+.compact-summary {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.compact-summary > summary {
+  padding: 10px 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.compact-summary > summary::-webkit-details-marker {
+  display: none;
+}
+
+.compact-summary > summary::before {
+  content: '▸ ';
+  color: var(--faint);
+}
+
+.compact-summary[open] > summary::before {
+  content: '▾ ';
+}
+
+.compact-summary-body {
+  max-height: 48vh;
+  overflow-y: auto;
+  padding: 4px 16px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.system-note {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.system-note > summary {
+  padding: 8px 14px;
+  color: var(--faint);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.system-note > summary::-webkit-details-marker {
+  display: none;
+}
+
+.system-note > summary::before {
+  content: '▸ ';
+}
+
+.system-note[open] > summary::before {
+  content: '▾ ';
+}
+
+.system-note-body {
+  margin: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .preview {
   opacity: 0.92;
 }
@@ -1762,32 +1837,105 @@ select:hover {
   outline: none;
 }
 
-/* ---------- 计划弹窗 ---------- */
+/* ---------- 内联计划卡 ---------- */
 
-.plan-card {
-  width: min(720px, calc(100vw - 80px));
-}
-
-.plan-body {
-  max-height: 56vh;
-  overflow-y: auto;
+.plan-inline {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
+  border-radius: 10px;
   background: var(--panel-2);
+  overflow: hidden;
+}
+
+.plan-inline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
   font-size: 13px;
-  margin-bottom: 16px;
+  text-align: left;
+  cursor: pointer;
 }
 
-.plan-feedback {
-  margin-bottom: 12px;
+.plan-inline-head:hover {
+  background: var(--panel-3);
 }
 
-.plan-feedback textarea {
+.plan-inline-icon {
+  color: var(--accent);
+  flex: none;
+}
+
+.plan-inline-title {
+  font-weight: 600;
+  flex: none;
+}
+
+.plan-inline-file {
+  color: var(--faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.plan-inline-status {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.plan-inline-status.pending {
+  color: var(--yellow);
+}
+
+.plan-inline-status.approved {
+  color: var(--green);
+}
+
+.plan-inline-status.rejected,
+.plan-inline-status.expired {
+  color: var(--red);
+}
+
+.plan-inline-status.readonly {
+  color: var(--faint);
+}
+
+.plan-inline-chevron {
+  color: var(--faint);
+  flex: none;
+}
+
+.plan-inline-body {
+  display: none;
+  max-height: 48vh;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.plan-inline.open .plan-inline-body {
+  display: block;
+}
+
+.plan-inline-feedback {
+  padding: 10px 14px 0;
+}
+
+.plan-inline-feedback textarea {
   width: 100%;
   resize: vertical;
   min-height: 64px;
-  background: var(--panel-2);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
@@ -1798,8 +1946,20 @@ select:hover {
   outline: none;
 }
 
-.plan-feedback textarea:focus {
+.plan-inline-feedback textarea:focus {
   border-color: var(--accent-border);
+}
+
+.plan-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.plan-inline-actions[hidden] {
+  display: none;
 }
 
 /* 滚动条 */
