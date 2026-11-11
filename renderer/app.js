@@ -130,6 +130,8 @@ const state = {
   lastStderrByKey: new Map(),
   running: false,
   sending: false,
+  stoppingKey: null,
+  stopNoticeShown: false,
   interruptRequested: false,
   attachments: [],
   streamEl: null,
@@ -1131,12 +1133,13 @@ function handleResult(message) {
   clearPrompts(state.activeKey);
   markUnfinishedTools();
   if (interrupted) {
-    appendNotice('已停止生成');
+    if (!state.stopNoticeShown) appendNotice('已停止生成');
   } else if (message.is_error && message.result) {
     showError(message.result);
   } else if (message.subtype !== 'success' && Array.isArray(message.errors) && message.errors.length) {
     showError(message.errors.join('\n'));
   }
+  state.stopNoticeShown = false;
   appendStats(message);
   setRunning(false);
   finishActivity(
@@ -1299,6 +1302,7 @@ function handleSessionState(key, payload) {
     state.startedKeys.delete(key);
     state.activityByKey.delete(key);
     state.interruptRequested = false;
+    if (state.stoppingKey === key) state.stoppingKey = null;
     if (hadTurn) {
       if (stopping) finishActivity('已停止生成', 'stopped');
       else handleUnexpectedEnd();
@@ -1704,6 +1708,8 @@ function resetConversation() {
   saveDraft(state.activeKey);
   state.switchToken += 1;
   state.interruptRequested = false;
+  state.stoppingKey = null;
+  state.stopNoticeShown = false;
   if (!els.findBar.hidden) closeFindBar();
   flushThinking();
   els.messages.innerHTML = `
@@ -3744,12 +3750,18 @@ async function sendMessage() {
     const content = buildMessageContent(text, attachments);
     setRunning(true);
     state.interruptRequested = false;
+    state.stopNoticeShown = false;
+    state.stoppingKey = null;
     state.lastStderrByKey.delete(key);
     recalcAwaitingUser();
     setActivity('等待模型响应…');
 
     const result = await window.desk.send(text, { key, steer, content });
     if (!result?.ok) {
+      // 用户在这期间点了停止并强制结束了会话：不要再覆盖成“发送失败”
+      if (state.interruptRequested || state.stoppingKey || state.stopNoticeShown) {
+        return;
+      }
       if (key === state.activeKey) {
         setRunning(false);
         setSessionStatus(key, null);
@@ -3781,11 +3793,36 @@ async function sendMessage() {
 }
 
 async function stopCurrent() {
+  const key = state.activeKey;
+  if (!key || state.stoppingKey === key) return;
+
+  state.stoppingKey = key;
   state.interruptRequested = true;
-  if (state.running) setActivity('正在停止…');
-  clearPrompts(state.activeKey);
-  await window.desk.interrupt({ key: state.activeKey });
+  clearPrompts(key);
+
+  // 立即给用户“已停止”的反馈，然后直接结束这个 CLI 进程；
+  // 下一条消息会通过 resume 重新拉起会话。
   setRunning(false);
+  state.startedKeys.delete(key);
+  state.sessionActive = false;
+  setSessionStatus(key, null);
+  finishActivity('已停止生成', 'stopped');
+  if (!state.stopNoticeShown) {
+    appendNotice('已停止生成');
+    state.stopNoticeShown = true;
+  }
+
+  try {
+    await window.desk.closeSession({ key });
+  } catch {
+    /* 会话可能已经结束，忽略 */
+  } finally {
+    if (state.stoppingKey === key) state.stoppingKey = null;
+    if (state.activeKey === key) {
+      setRunning(false);
+      state.sessionActive = false;
+    }
+  }
 }
 
 async function pickDirectoryAndOpen() {
