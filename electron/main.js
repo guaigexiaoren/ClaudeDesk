@@ -30,6 +30,7 @@ const {
   FALLBACK_URLS,
 } = require('./env-status');
 const { readClaudeMd, writeClaudeMd } = require('./global-rules');
+const { withDarwinPath } = require('./platform-path');
 
 const IS_SMOKE =
   process.argv.includes('--smoke') ||
@@ -58,7 +59,10 @@ let focusedKey = null;
 let terminal = null;
 let isQuitting = false;
 let idleTimer = null;
-const QUICK_SHORTCUT = 'CommandOrControl+Alt+Space';
+const QUICK_SHORTCUT =
+  process.platform === 'darwin'
+    ? 'CommandOrControl+Shift+Space'
+    : 'CommandOrControl+Alt+Space';
 const IDLE_CLOSE_MS = Number(process.env.CLAUDE_DESK_IDLE_MS) || 30 * 60 * 1000;
 const IDLE_CHECK_MS = Math.min(60_000, IDLE_CLOSE_MS);
 
@@ -285,9 +289,16 @@ function toggleQuickWindow() {
 
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'));
-  tray = new Tray(process.platform === 'win32' ? icon.resize({ width: 16, height: 16 }) : icon);
+  const trayIcon =
+    process.platform === 'win32'
+      ? icon.resize({ width: 16, height: 16 })
+      : process.platform === 'darwin'
+        ? icon.resize({ width: 18, height: 18 })
+        : icon;
+  tray = new Tray(trayIcon);
   tray.setToolTip('ClaudeDesk');
-  const shortcutLabel = process.platform === 'darwin' ? 'Cmd+Alt+Space' : 'Ctrl+Alt+Space';
+  const shortcutLabel =
+    process.platform === 'darwin' ? 'Cmd+Shift+Space' : 'Ctrl+Alt+Space';
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '显示主窗口', click: showMainWindow },
@@ -999,6 +1010,7 @@ function registerIpc() {
         electron: process.versions.electron,
         homeDir: app.getPath('home'),
         defaultCwd: settings.cwd || app.getPath('home'),
+        platform: process.platform,
       };
     })
   );
@@ -1302,7 +1314,7 @@ function registerIpc() {
 
       if (action.kind === 'launch-ccswitch') {
         const exe = findCcSwitchPath({
-          env: process.env,
+          env: withDarwinPath(process.env),
           localAppData:
             process.env.LOCALAPPDATA || path.join(app.getPath('home'), 'AppData', 'Local'),
           programFiles: process.env.ProgramFiles || 'C:\\Program Files',
@@ -1512,6 +1524,22 @@ function buildMenu() {
       ],
     },
   ];
+
+  if (process.platform === 'darwin') {
+    template.unshift({
+      label: 'ClaudeDesk',
+      submenu: [
+        { role: 'about', label: '关于 ClaudeDesk' },
+        { type: 'separator' },
+        { role: 'hide', label: '隐藏 ClaudeDesk' },
+        { role: 'hideOthers', label: '隐藏其他' },
+        { role: 'unhide', label: '显示全部' },
+        { type: 'separator' },
+        { role: 'quit', label: '退出 ClaudeDesk' },
+      ],
+    });
+  }
+
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 

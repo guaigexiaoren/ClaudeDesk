@@ -12,6 +12,8 @@ const {
   summarizeStatus,
   pickAuthSource,
   mcpNeedsNode,
+  downloadUrl,
+  findPython,
 } = require('../electron/env-status');
 
 test('代理地址只保留 host 和端口，不泄露用户信息与查询参数', () => {
@@ -120,4 +122,37 @@ test('MCP 配置使用 npx 时标记需要 Node', () => {
   );
   assert.equal(needs.uses, 2);
   assert.equal(mcpNeedsNode({ mcpServers: { c: { command: 'python' } } }, 'C:\\work').uses, 0);
+});
+
+test('安装下载页按平台区分 Windows 与 macOS', () => {
+  assert.equal(downloadUrl('git', 'win32'), 'https://git-scm.com/download/win');
+  assert.equal(downloadUrl('git', 'darwin'), 'https://git-scm.com/download/mac');
+  assert.equal(
+    downloadUrl('python', 'darwin'),
+    'https://www.python.org/downloads/macos/'
+  );
+  assert.equal(downloadUrl('node', 'darwin'), 'https://nodejs.org/');
+  assert.equal(downloadUrl('unknown', 'darwin'), null);
+});
+
+test('macOS 上优先识别 python3，而不是 Windows 的 py.exe', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudedesk-python-'));
+  try {
+    const executable = path.join(dir, 'python3');
+    fs.writeFileSync(executable, '');
+    const found = findPython(
+      { PATH: dir, Path: dir },
+      '',
+      '',
+      '',
+      'darwin'
+    );
+    assert.equal(found.exe, executable);
+    assert.deepEqual(found.args, ['--version']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

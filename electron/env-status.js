@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 const { execFile } = require('node:child_process');
+const { withDarwinPath } = require('./platform-path');
 
 const WINGET_PACKAGES = Object.freeze({
   git: 'Git.Git',
@@ -16,12 +17,35 @@ const WINGET_PACKAGES = Object.freeze({
   python: 'Python.Python.3.13',
 });
 
+const DOWNLOAD_URLS = Object.freeze({
+  win32: {
+    git: 'https://git-scm.com/download/win',
+    python: 'https://www.python.org/downloads/windows/',
+  },
+  darwin: {
+    git: 'https://git-scm.com/download/mac',
+    python: 'https://www.python.org/downloads/macos/',
+  },
+  linux: {
+    git: 'https://git-scm.com/download/linux',
+    python: 'https://www.python.org/downloads/source/',
+  },
+});
+
+function downloadUrl(tool, platform = process.platform) {
+  if (tool === 'node') return 'https://nodejs.org/';
+  if (tool === 'ccswitch') return 'https://github.com/farion1231/cc-switch/releases/latest';
+  if (tool === 'claude') return 'https://docs.anthropic.com/en/docs/claude-code/setup';
+  const urls = DOWNLOAD_URLS[platform] || DOWNLOAD_URLS.win32;
+  return urls[tool] || null;
+}
+
 const FALLBACK_URLS = Object.freeze({
-  git: 'https://git-scm.com/download/win',
-  node: 'https://nodejs.org/',
-  python: 'https://www.python.org/downloads/windows/',
-  ccswitch: 'https://github.com/farion1231/cc-switch/releases/latest',
-  claude: 'https://docs.anthropic.com/en/docs/claude-code/setup',
+  git: downloadUrl('git'),
+  node: downloadUrl('node'),
+  python: downloadUrl('python'),
+  ccswitch: downloadUrl('ccswitch'),
+  claude: downloadUrl('claude'),
 });
 
 const ENV_ACTIONS = Object.freeze({
@@ -193,8 +217,11 @@ function splitPath(env) {
   return String(env.PATH || env.Path || '').split(path.delimiter).filter(Boolean);
 }
 
-function findExecutable(name, { env, extraDirs = [], excludeWindowsApps = false } = {}) {
-  const extensions = process.platform === 'win32' ? ['.exe', '.com', '.cmd', '.bat'] : [''];
+function findExecutable(
+  name,
+  { env, extraDirs = [], excludeWindowsApps = false, platform = process.platform } = {}
+) {
+  const extensions = platform === 'win32' ? ['.exe', '.com', '.cmd', '.bat'] : [''];
   const seen = new Set();
   for (const dir of [...splitPath(env), ...extraDirs]) {
     if (!dir) continue;
@@ -210,9 +237,24 @@ function findExecutable(name, { env, extraDirs = [], excludeWindowsApps = false 
   return null;
 }
 
-function findPython(env, localAppData, programFiles, programFilesX86) {
+function findPython(
+  env,
+  localAppData,
+  programFiles,
+  programFilesX86,
+  platform = process.platform
+) {
+  if (platform !== 'win32') {
+    for (const name of ['python3', 'python']) {
+      const executable = findExecutable(name, { env, platform });
+      if (executable) return { exe: executable, args: ['--version'] };
+    }
+    return null;
+  }
+
   const launcher = findExecutable('py', {
     env,
+    platform,
     extraDirs: [path.join(localAppData, 'Programs', 'Python', 'Launcher')],
   });
   if (launcher) return { exe: launcher, args: ['-3', '--version'] };
@@ -239,7 +281,7 @@ function findPython(env, localAppData, programFiles, programFilesX86) {
   return null;
 }
 
-function findCcSwitchPath({ env, localAppData, programFiles }) {
+function findCcSwitchPath({ env, localAppData, programFiles, platform = process.platform }) {
   const candidates = [
     path.join(localAppData, 'Programs', 'CC Switch', 'cc-switch.exe'),
     path.join(programFiles, 'CC Switch', 'cc-switch.exe'),
@@ -247,7 +289,7 @@ function findCcSwitchPath({ env, localAppData, programFiles }) {
   for (const candidate of candidates) {
     if (fileExists(candidate)) return candidate;
   }
-  return findExecutable('cc-switch', { env });
+  return findExecutable('cc-switch', { env, platform });
 }
 
 function findStandaloneClaude(env) {
@@ -352,6 +394,8 @@ async function collectEnvStatus(options = {}) {
   const programFilesX86 = options.programFilesX86 || env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
   const run = options.runCommand || runCommand;
   const tcp = options.probeTcp || probeTcp;
+  // GUI 启动的 macOS 应用 PATH 很短，探测时补上 Homebrew 目录
+  const probeEnv = withDarwinPath(env, platform);
 
   const userSettings = readJson(path.join(home, '.claude', 'settings.json'));
   const projectSettings = readJson(path.join(cwd, '.claude', 'settings.json'));
@@ -361,24 +405,37 @@ async function collectEnvStatus(options = {}) {
 
   const authSource = pickAuthSource(env, [projectLocal, projectSettings, userSettings]);
   const baseUrl = sanitizeBaseUrl(authSource.baseUrl);
-  const ccswitchPath = findCcSwitchPath({ env, localAppData, programFiles });
+  const ccswitchPath = findCcSwitchPath({
+    env: probeEnv,
+    localAppData,
+    programFiles,
+    platform,
+  });
   const bundledPath = options.resolveBundledClaude ? options.resolveBundledClaude() : null;
-  const standalone = findStandaloneClaude(env);
+  const standalone = findStandaloneClaude(probeEnv);
   const nodeDirs = [path.join(programFiles, 'nodejs')];
   const gitExe = findExecutable('git', {
-    env,
+    env: probeEnv,
+    platform,
     extraDirs: [path.join(programFiles, 'Git', 'cmd')],
   });
   const bashCandidates = [
-    env.CLAUDE_CODE_GIT_BASH_PATH,
+    probeEnv.CLAUDE_CODE_GIT_BASH_PATH,
     gitExe ? path.resolve(path.dirname(gitExe), '..', 'bin', 'bash.exe') : null,
     path.join(programFiles, 'Git', 'bin', 'bash.exe'),
     path.join(programFiles, 'Git', 'usr', 'bin', 'bash.exe'),
   ].filter(Boolean);
-  const bashExe = bashCandidates.find(fileExists) || findExecutable('bash', { env });
-  const nodeExe = findExecutable('node', { env, extraDirs: nodeDirs });
-  const npxPath = findExecutable('npx', { env, extraDirs: nodeDirs });
-  const python = findPython(env, localAppData, programFiles, programFilesX86);
+  const bashExe =
+    bashCandidates.find(fileExists) || findExecutable('bash', { env: probeEnv, platform });
+  const nodeExe = findExecutable('node', { env: probeEnv, platform, extraDirs: nodeDirs });
+  const npxPath = findExecutable('npx', { env: probeEnv, platform, extraDirs: nodeDirs });
+  const python = findPython(
+    probeEnv,
+    localAppData,
+    programFiles,
+    programFilesX86,
+    platform
+  );
   const mcp = mcpNeedsNode(claudeConfig, cwd);
   const helperPresent = Boolean(
     userSettings.apiKeyHelper ||
@@ -566,7 +623,11 @@ async function collectEnvStatus(options = {}) {
   const summary = summarizeStatus(all);
   const notes = [];
   if (!winget.available) {
-    notes.push('本机 winget 不可用，安装操作会自动打开官方下载页');
+    notes.push(
+      platform === 'win32'
+        ? '本机 winget 不可用，安装操作会自动打开官方下载页'
+        : '安装操作会打开官方下载页'
+    );
   }
   if (summary.requiredMissing > 0) {
     notes.push('安装完成后请点「重新检查」；若仍不识别，请重启 ClaudeDesk');
@@ -590,6 +651,7 @@ module.exports = {
   WINGET_PACKAGES,
   resolveEnvAction,
   buildWingetScript,
+  downloadUrl,
   sanitizeBaseUrl,
   isWindowsAppsPath,
   versionFrom,
@@ -599,6 +661,7 @@ module.exports = {
   collectEnvStatus,
   findCcSwitchPath,
   findStandaloneClaude,
+  findPython,
   mcpNeedsNode,
   pickAuthSource,
 };

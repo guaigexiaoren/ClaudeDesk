@@ -2,6 +2,7 @@
 
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
+const { withDarwinPath } = require('./platform-path');
 
 /**
  * 真终端会话：通过 node-pty 启动一个带伪终端（PTY）的 shell。
@@ -45,7 +46,7 @@ class TerminalSession {
       cols: Math.max(20, Number(cols) || 80),
       rows: Math.max(5, Number(rows) || 24),
       cwd: cwd || os.homedir(),
-      env: { ...process.env, TERM: 'xterm-256color' },
+      env: withDarwinPath({ ...process.env, TERM: 'xterm-256color' }),
     };
     if (isWin) {
       // 用 node-pty 自带的 ConPTY，不依赖系统组件，也避免退出时的控制台枚举报错

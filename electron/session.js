@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
+const { withDarwinPath } = require('./platform-path');
 
 /**
  * 一个可以被异步 for-await 消费的消息队列，用来把界面发来的消息喂给 SDK。
@@ -99,11 +100,11 @@ class SessionManager extends EventEmitter {
         enableFileCheckpointing: true,
         abortController: this.controller,
         settingSources: ['user', 'project', 'local'],
-        env: {
+        env: withDarwinPath({
           ...process.env,
           CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
           CLAUDE_AGENT_SDK_CLIENT_APP: 'claude-desk/1.0.0',
-        },
+        }),
         stderr: (data) => this.emit('stderr', data),
         canUseTool: (toolName, input, opts) => this._askPermission(toolName, input, opts),
       };

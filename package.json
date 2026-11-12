@@ -38,8 +38,6 @@
       "node_modules/zod/**/*",
       "node_modules/node-pty/**/*",
       "!node_modules/node-pty/prebuilds/win32-arm64/**/*",
-      "!node_modules/node-pty/prebuilds/darwin-x64/**/*",
-      "!node_modules/node-pty/prebuilds/darwin-arm64/**/*",
       "!node_modules/marked/**/*",
       "!node_modules/dompurify/**/*",
       "!node_modules/highlight.js/**/*",

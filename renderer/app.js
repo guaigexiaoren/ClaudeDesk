@@ -106,6 +106,7 @@ const state = {
   permissionMode: 'default',
   sessionId: null,
   sessionActive: false,
+  platform: '',
   // 多会话：key 是后端会话标识，sessionId 是 SDK 会话标识
   activeKey: null,
   startedKeys: new Set(),
@@ -1899,6 +1900,15 @@ function updateSessionTitle(title) {
   document.title = title ? `${title} - ClaudeDesk` : 'ClaudeDesk';
 }
 
+function applyShortcutTip() {
+  const tip = document.getElementById('quick-tip');
+  if (!tip) return;
+  tip.textContent =
+    state.platform === 'darwin'
+      ? 'Cmd + Shift + Space 快速提问'
+      : 'Ctrl + Alt + Space 快速提问';
+}
+
 function resetConversation() {
   saveDraft(state.activeKey);
   state.switchToken += 1;
@@ -1917,9 +1927,10 @@ function resetConversation() {
         <span>Shift + Enter 换行</span>
         <span>Esc 停止生成</span>
         <span>Ctrl / Cmd + F 查找</span>
-        <span>Ctrl / Cmd + Alt + Space 快速提问</span>
+        <span id="quick-tip">Ctrl + Alt + Space 快速提问</span>
       </div>
     </div>`;
+  applyShortcutTip();
   state.streamEl = null;
   state.toolCards.clear();
   state.toolGroup = null;
@@ -4275,6 +4286,8 @@ async function init() {
   const initial = await window.desk.getState();
   if (initial?.ok) {
     state.settings = initial.settings || {};
+    state.platform = initial.platform || '';
+    applyShortcutTip();
     state.conciseMode = initial.settings.conciseMode !== false;
     els.conciseMode.checked = state.conciseMode;
     state.model = 'default';
