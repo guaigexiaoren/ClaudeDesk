@@ -73,12 +73,25 @@ npm run pack       # 只生成目录，不压缩
 
 ### 在 Mac 上使用
 
+如果新电脑上还没有 Node/npm，可以直接运行仓库里的准备脚本；它会安装 Homebrew、Node.js、Claude Code 命令行版，并打包 ClaudeDesk：
+
 ```bash
 git clone https://github.com/guaigexiaoren/ClaudeDesk.git
 cd ClaudeDesk
-npm install        # 会自动装上 darwin-arm64 的 Claude 引擎
+bash mac-setup.command
+```
+
+完成后安装包在 `release/`：
+
+- Apple Silicon：`ClaudeDesk-1.0.0-arm64.dmg`
+- Intel：`ClaudeDesk-1.0.0-x64.dmg`
+
+也可以手动执行：
+
+```bash
+npm install        # 会自动装上 darwin 的 Claude 引擎
 npm start          # 开发运行
-npm run dist:mac   # 生成 dmg
+npm run dist:mac   # 生成 dmg + zip
 ```
 
 首次打开未签名的应用会被 Gatekeeper 拦截：右键应用选「打开」，或执行 `xattr -cr /Applications/ClaudeDesk.app`。
