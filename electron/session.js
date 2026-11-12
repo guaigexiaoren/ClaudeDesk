@@ -58,6 +58,8 @@ class SessionManager extends EventEmitter {
     this.status = 'idle';
     this.pendingPermissions = new Map();
     this.starting = false;
+    this.cancelStart = false;
+    this.closedByUser = false;
   }
 
   _emitState(extra = {}) {
@@ -72,11 +74,16 @@ class SessionManager extends EventEmitter {
 
   async start({ cwd, model, permissionMode, resume } = {}) {
     if (this.starting) throw new Error('会话正在启动中');
+    if (this.closedByUser) return { ok: false, error: '会话已关闭' };
     this.starting = true;
+    this.cancelStart = false;
     try {
-      await this.close();
+      await this._reset();
+      // 启动期间被 session:close / 窗口重载关闭：不要再拉起新进程
+      if (this.cancelStart) return { ok: false, error: '会话已关闭' };
 
       const { query } = await import('@anthropic-ai/claude-agent-sdk');
+      if (this.cancelStart) return { ok: false, error: '会话已关闭' };
 
       this.cwd = cwd || process.cwd();
       this.model = model && model !== 'default' ? model : null;
@@ -332,6 +339,12 @@ class SessionManager extends EventEmitter {
   }
 
   async close() {
+    // 启动过程中被关闭：让 start() 在下一个检查点放弃拉起 CLI
+    if (this.starting) this.cancelStart = true;
+    return this._reset();
+  }
+
+  async _reset() {
     this._settlePending('会话已关闭。');
     if (this.queue) {
       this.queue.close();

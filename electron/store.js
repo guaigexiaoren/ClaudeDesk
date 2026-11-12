@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS = {
   accent: 'claude',
   trash: [],
   fontSize: 14,
+  conciseMode: true,
   lastSessionId: '',
   windowBounds: { width: 1320, height: 880 },
 };

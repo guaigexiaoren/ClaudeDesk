@@ -63,7 +63,9 @@ class TerminalSession {
     const spawned = this.proc;
     spawned.onData((data) => onData?.(data));
     spawned.onExit(({ exitCode, signal }) => {
-      if (this.proc === spawned) this.proc = null;
+      // 重启后旧 PTY 的退出事件不能污染新终端
+      if (this.proc !== spawned) return;
+      this.proc = null;
       onExit?.({ exitCode, signal });
     });
 

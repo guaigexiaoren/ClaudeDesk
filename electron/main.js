@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const { spawn } = require('node:child_process');
 const {
   app,
   BrowserWindow,
@@ -19,6 +20,16 @@ const {
 const { Store } = require('./store');
 const { SessionManager } = require('./session');
 const { TerminalSession } = require('./terminal');
+const {
+  collectEnvStatus,
+  resolveEnvAction,
+  buildWingetScript,
+  runCommand,
+  versionFrom,
+  findCcSwitchPath,
+  FALLBACK_URLS,
+} = require('./env-status');
+const { readClaudeMd, writeClaudeMd } = require('./global-rules');
 
 const IS_SMOKE =
   process.argv.includes('--smoke') ||
@@ -809,6 +820,7 @@ function getSessionManager(key) {
 
 function closeAllSessions() {
   for (const manager of sessions.values()) {
+    manager.closedByUser = true;
     manager.close().catch(() => {});
   }
   sessions.clear();
@@ -826,6 +838,7 @@ function startIdleReaper() {
       if (manager.pendingPermissions.size > 0) continue;
       if (now - (manager.lastActiveAt || 0) < IDLE_CLOSE_MS) continue;
       sessions.delete(key);
+      manager.closedByUser = true;
       manager.close().catch(() => {});
       send('session:released', { key });
     }
@@ -837,6 +850,7 @@ async function closeSessionManager(key) {
   const manager = sessions.get(key);
   sessions.delete(key);
   if (!manager) return { ok: true };
+  manager.closedByUser = true;
   await manager.close();
   if (focusedKey === key) focusedKey = null;
   return { ok: true };
@@ -849,6 +863,19 @@ function trimHistoryText(text) {
   return typeof text === 'string' && text.length > MAX_HISTORY_TEXT
     ? `${text.slice(0, MAX_HISTORY_TEXT)}\n…（已截断）`
     : text;
+}
+
+/** 设置页展示 MCP 命令时隐藏参数里的常见密钥。 */
+function maskMcpArg(value) {
+  let text = String(value ?? '');
+  text = text.replace(
+    /(--?[a-z0-9_-]*(?:api[-_]?key|token|secret|password|passwd|auth)[a-z0-9_-]*=)([^\s]+)/gi,
+    '$1***'
+  );
+  text = text.replace(/(Bearer\s+)[^\s"']+/gi, '$1***');
+  text = text.replace(/((?:x-api-key|authorization)\s*:\s*)[^\s"']+/gi, '$1***');
+  text = text.replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, '***');
+  return text;
 }
 
 function trimHistoryMessage(item) {
@@ -883,6 +910,75 @@ function trimHistoryMessage(item) {
 }
 
 function registerIpc() {
+  const lastEnvActionAt = new Map();
+
+  function openFixedUrl(url) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') throw new Error('仅允许打开 https 页面');
+    return shell.openExternal(url);
+  }
+
+  function waitForSpawn(child, timeoutMs = 2000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn(value);
+      };
+      const timer = setTimeout(() => finish(resolve), timeoutMs);
+      child.once('spawn', () => finish(resolve));
+      child.once('error', (error) => finish(reject, error));
+    });
+  }
+
+  async function spawnVisiblePowerShell(script) {
+    const powershell = path.join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'powershell.exe'
+    );
+    const child = spawn(
+      powershell,
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', script],
+      { detached: true, windowsHide: false, stdio: 'ignore' }
+    );
+    await waitForSpawn(child);
+    child.unref();
+  }
+
+  async function spawnDetached(exe) {
+    const child = spawn(exe, [], { detached: true, windowsHide: false, stdio: 'ignore' });
+    await waitForSpawn(child);
+    child.unref();
+  }
+
+  async function probeWingetNow() {
+    const result = await runCommand('winget', ['--version'], 3000);
+    const version = versionFrom(result.stdout || result.stderr);
+    return { available: result.ok && Boolean(version), version };
+  }
+
+  function resolveBundledClaudeForEnv() {
+    const packaged = resolveClaudeExecutable();
+    if (packaged) return packaged;
+    try {
+      const sdkEntry = require.resolve('@anthropic-ai/claude-agent-sdk');
+      const binary = process.platform === 'win32' ? 'claude.exe' : 'claude';
+      return path.join(
+        path.dirname(sdkEntry),
+        '..',
+        `claude-agent-sdk-${process.platform}-${process.arch}`,
+        binary
+      );
+    } catch {
+      return null;
+    }
+  }
+
   const safe = (handler) => async (event, ...args) => {
     try {
       return await handler(...args);
@@ -1120,8 +1216,8 @@ function registerIpc() {
         name,
         scope,
         type: server.type || 'stdio',
-        command: server.command || server.url || '',
-        args: Array.isArray(server.args) ? server.args : [],
+        command: maskMcpArg(server.command || server.url || ''),
+        args: Array.isArray(server.args) ? server.args.map(maskMcpArg) : [],
       });
 
       const servers = Object.entries(config.mcpServers || {}).map(([name, server]) =>
@@ -1145,6 +1241,94 @@ function registerIpc() {
       }
 
       return { ok: true, servers, configPath };
+    })
+  );
+
+  ipcMain.handle(
+    'env:status',
+    safe(async () =>
+      collectEnvStatus({
+        home: app.getPath('home'),
+        cwd: store.get().cwd || app.getPath('home'),
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        env: process.env,
+        localAppData: process.env.LOCALAPPDATA,
+        programFiles: process.env.ProgramFiles,
+        programFilesX86: process.env['ProgramFiles(x86)'],
+        resolveBundledClaude: resolveBundledClaudeForEnv,
+      })
+    )
+  );
+
+  ipcMain.handle(
+    'env:action',
+    safe(async ({ actionId } = {}) => {
+      const action = resolveEnvAction(actionId);
+      if (!action) return { ok: false, error: '不支持的操作' };
+
+      const now = Date.now();
+      const last = lastEnvActionAt.get(actionId) || 0;
+      if (now - last < 30_000) return { ok: false, error: '操作太频繁，请稍后再试' };
+      lastEnvActionAt.set(actionId, now);
+
+      if (action.kind === 'download' || action.kind === 'docs') {
+        await openFixedUrl(action.url);
+        return { ok: true, kind: action.kind, message: '已打开官方页面' };
+      }
+
+      if (action.kind === 'install') {
+        const winget = await probeWingetNow();
+        if (process.platform !== 'win32' || !winget.available) {
+          const url = FALLBACK_URLS[action.tool];
+          if (!url) return { ok: false, error: '未知组件' };
+          await openFixedUrl(url);
+          return {
+            ok: true,
+            kind: 'download',
+            degraded: true,
+            message: '本机 winget 不可用，已打开官方下载页',
+          };
+        }
+        const script = buildWingetScript(action.tool, 'winget');
+        if (!script) return { ok: false, error: '未知组件' };
+        await spawnVisiblePowerShell(script);
+        return {
+          ok: true,
+          kind: 'install',
+          message: '已打开安装窗口，安装完成后请点“重新检查”',
+        };
+      }
+
+      if (action.kind === 'launch-ccswitch') {
+        const exe = findCcSwitchPath({
+          env: process.env,
+          localAppData:
+            process.env.LOCALAPPDATA || path.join(app.getPath('home'), 'AppData', 'Local'),
+          programFiles: process.env.ProgramFiles || 'C:\\Program Files',
+        });
+        if (!exe) {
+          await openFixedUrl(FALLBACK_URLS.ccswitch);
+          return { ok: true, kind: 'download', message: '未找到 CC Switch，已打开下载页' };
+        }
+        await spawnDetached(exe);
+        return { ok: true, kind: 'launch', message: '正在启动 CC Switch' };
+      }
+
+      return { ok: false, error: '不支持的操作' };
+    })
+  );
+
+  ipcMain.handle(
+    'global-rules:get',
+    safe(async () => ({ ok: true, ...readClaudeMd(app.getPath('home')) }))
+  );
+
+  ipcMain.handle(
+    'global-rules:save',
+    safe(async ({ content } = {}) => {
+      const result = writeClaudeMd(app.getPath('home'), content);
+      return { ok: true, ...result };
     })
   );
 

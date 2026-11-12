@@ -131,6 +131,7 @@ const state = {
   running: false,
   sending: false,
   stoppingKey: null,
+  stopSeq: 0,
   stopNoticeShown: false,
   interruptRequested: false,
   attachments: [],
@@ -146,6 +147,12 @@ const state = {
   replaying: false,
   pendingEvents: [],
   toolCards: new Map(),
+  toolGroup: null,
+  thinkingGroup: null,
+  conciseMode: true,
+  envLoading: false,
+  globalRulesLoadedContent: '',
+  globalRulesLoading: false,
   permissionQueue: [],
   currentPermission: null,
   currentQuestion: null,
@@ -219,6 +226,16 @@ const els = {
   settingsVersion: $('settings-version'),
   mcpList: $('mcp-list'),
   mcpRefresh: $('mcp-refresh'),
+  conciseMode: $('concise-mode'),
+  globalRulesText: $('global-rules-text'),
+  globalRulesSave: $('global-rules-save'),
+  globalRulesReload: $('global-rules-reload'),
+  globalRulesStatus: $('global-rules-status'),
+  envSummary: $('env-summary'),
+  envList: $('env-list'),
+  envRefresh: $('env-refresh'),
+  envCheckedAt: $('env-checked-at'),
+  envNote: $('env-note'),
   sessionSearch: $('session-search'),
   multiToggle: $('multi-toggle'),
   batchBar: $('batch-bar'),
@@ -356,6 +373,7 @@ function attachmentDataUrl(attachment) {
 }
 
 function appendUserMessage(text, steer = false, uuid = '', attachments = []) {
+  closeToolGroup();
   const wrap = document.createElement('div');
   wrap.className = 'msg user';
   const bubble = document.createElement('div');
@@ -706,6 +724,16 @@ function formatElapsed(ms) {
 }
 
 function appendThinking(text) {
+  if (state.conciseMode) {
+    const group = ensureThinkingGroup();
+    const segment = document.createElement('div');
+    segment.className = 'thinking-segment';
+    segment.textContent = text;
+    group.body.appendChild(segment);
+    group.segments += 1;
+    updateThinkingGroup(group);
+    return group.details;
+  }
   const details = document.createElement('details');
   details.className = 'thinking';
   const summary = document.createElement('summary');
@@ -721,12 +749,70 @@ function appendThinking(text) {
   return details;
 }
 
-/** 思考开始时先插一个带计时的展开块，边想边显示。 */
+function closeThinkingGroup() {
+  state.thinkingGroup = null;
+}
+
+function ensureThinkingGroup() {
+  if (state.thinkingGroup) return state.thinkingGroup;
+  const details = document.createElement('details');
+  details.className = 'thinking-group';
+  const summary = document.createElement('summary');
+  summary.textContent = '思考过程';
+  const body = document.createElement('div');
+  body.className = 'thinking-group-body';
+  details.append(summary, body);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant';
+  wrap.appendChild(details);
+  appendEl(wrap);
+
+  const group = { details, summary, body, wrap, segments: 0, totalMs: 0 };
+  state.thinkingGroup = group;
+  return group;
+}
+
+function updateThinkingGroup(group) {
+  if (!group) return;
+  const parts = [`思考过程 · ${group.segments} 段`];
+  if (group.totalMs > 0) parts.push(`用时 ${formatElapsed(group.totalMs)}`);
+  group.summary.textContent = parts.join(' · ');
+}
+
+/** 思考开始时插一个默认收起的计时块，只显示“思考中… N 秒”。 */
 function beginThinking(index) {
   setActivity('正在思考…');
+  if (state.conciseMode) {
+    const group = ensureThinkingGroup();
+    const segment = document.createElement('div');
+    segment.className = 'thinking-segment';
+    group.body.appendChild(segment);
+    group.segments += 1;
+
+    const entry = {
+      group,
+      segment,
+      body: segment,
+      summary: group.summary,
+      index,
+      startedAt: performance.now(),
+      stoppedAt: 0,
+      timer: null,
+    };
+    const tick = () => {
+      if (entry.stoppedAt) return;
+      group.summary.textContent = `思考中… ${formatElapsed(performance.now() - entry.startedAt)}`;
+    };
+    tick();
+    entry.timer = setInterval(tick, 200);
+    state.thinkingLive.push(entry);
+    return entry;
+  }
+
   const details = document.createElement('details');
   details.className = 'thinking live';
-  details.open = true;
+  details.open = false;
   const summary = document.createElement('summary');
   const body = document.createElement('div');
   body.className = 'thinking-body';
@@ -763,7 +849,13 @@ function stopThinkingTimer(entry) {
     entry.timer = null;
   }
   entry.stoppedAt = performance.now();
+  if (entry.group) {
+    entry.group.totalMs += entry.stoppedAt - entry.startedAt;
+    updateThinkingGroup(entry.group);
+    return;
+  }
   entry.details.classList.remove('live');
+  entry.details.open = false;
   entry.summary.textContent = `思考过程 · 用时 ${formatElapsed(entry.stoppedAt - entry.startedAt)}`;
 }
 
@@ -798,13 +890,80 @@ function claimThinking(text) {
 function flushThinking() {
   for (const entry of state.thinkingLive) {
     stopThinkingTimer(entry);
-    if (!entry.body.textContent.trim()) entry.details.parentElement?.remove();
+    if (entry.group) {
+      if (!entry.segment.textContent.trim()) {
+        entry.segment.remove();
+        entry.group.segments = Math.max(0, entry.group.segments - 1);
+        entry.group.totalMs = Math.max(
+          0,
+          entry.group.totalMs - (entry.stoppedAt - entry.startedAt)
+        );
+        updateThinkingGroup(entry.group);
+      }
+    } else if (!entry.body.textContent.trim()) {
+      entry.details.parentElement?.remove();
+    }
   }
   state.thinkingLive = [];
+  const group = state.thinkingGroup;
+  if (group && group.segments <= 0 && !group.body.textContent.trim()) {
+    group.wrap.remove();
+    state.thinkingGroup = null;
+  }
+}
+
+/** 结束当前的工具/思考分组；下一段内容会新建分组。 */
+function closeToolGroup() {
+  state.toolGroup = null;
+  state.thinkingGroup = null;
+}
+
+function ensureToolGroup() {
+  if (state.toolGroup) return state.toolGroup;
+  const details = document.createElement('details');
+  details.className = 'tool-group';
+  const summary = document.createElement('summary');
+  const body = document.createElement('div');
+  body.className = 'tool-group-body';
+  details.append(summary, body);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg assistant';
+  wrap.appendChild(details);
+  appendEl(wrap);
+
+  const group = { details, summary, body, ids: [] };
+  state.toolGroup = group;
+  updateToolGroup(group);
+  return group;
+}
+
+function updateToolGroup(group) {
+  if (!group) return;
+  const entries = group.ids.map((id) => state.toolCards.get(id)).filter(Boolean);
+  const names = new Set();
+  let running = 0;
+  let failed = 0;
+  for (const entry of entries) {
+    if (entry.name) names.add(entry.name);
+    const failedEntry = entry.status.classList.contains('error');
+    if (!entry.hasResult && !failedEntry) running += 1;
+    if (failedEntry) failed += 1;
+  }
+  const parts = [`工具调用 · ${entries.length} 次`];
+  if (names.size > 0) parts.push([...names].slice(0, 4).join('/'));
+  if (running > 0) parts.push(`${running} 个运行中`);
+  if (failed > 0) parts.push(`${failed} 个失败`);
+  group.summary.textContent = parts.join(' · ');
+  group.summary.classList.toggle('running', running > 0 && failed === 0);
+  group.summary.classList.toggle('error', failed > 0);
 }
 
 function appendToolUse(block) {
-  if (block?.name === 'ExitPlanMode') return appendPlanToolCard(block);
+  if (block?.name === 'ExitPlanMode') {
+    closeToolGroup();
+    return appendPlanToolCard(block);
+  }
   // 同一条 tool_use 重复到达时不重复建卡
   if (block.id && state.toolCards.has(block.id)) {
     return state.toolCards.get(block.id).card;
@@ -850,12 +1009,28 @@ function appendToolUse(block) {
 
   head.addEventListener('click', () => card.classList.toggle('open'));
 
+  if (state.conciseMode) {
+    const group = ensureToolGroup();
+    group.body.appendChild(card);
+    group.ids.push(block.id);
+    state.toolCards.set(block.id, {
+      card,
+      status,
+      body,
+      hasResult: false,
+      group,
+      name: block.name,
+    });
+    updateToolGroup(group);
+    return card;
+  }
+
   const wrap = document.createElement('div');
   wrap.className = 'msg assistant';
   wrap.appendChild(card);
   appendEl(wrap);
 
-  state.toolCards.set(block.id, { card, status, body, hasResult: false });
+  state.toolCards.set(block.id, { card, status, body, hasResult: false, name: block.name });
   return card;
 }
 
@@ -891,11 +1066,13 @@ function attachToolResult(toolUseId, text, isError) {
   entry.resultPre.textContent = clipped;
   entry.status.className = `tool-status ${isError ? 'error' : 'done'}`;
   entry.status.textContent = isError ? '失败' : '完成';
+  if (entry.group) updateToolGroup(entry.group);
   if (state.running) setActivity('等待模型响应…');
-  scrollToBottom();
+  if (!state.conciseMode) scrollToBottom();
 }
 
 function appendStats(message) {
+  closeToolGroup();
   const parts = [];
   if (message.duration_ms) parts.push(`耗时 ${formatDuration(message.duration_ms)}`);
   if (typeof message.total_cost_usd === 'number') parts.push(`$${message.total_cost_usd.toFixed(4)}`);
@@ -912,6 +1089,7 @@ function appendStats(message) {
 }
 
 function appendNotice(text) {
+  closeToolGroup();
   const el = document.createElement('div');
   el.className = 'msg assistant turn-stats';
   el.textContent = text;
@@ -926,6 +1104,7 @@ function formatTokenCount(value) {
 
 /** 压缩提示：实时事件带 token 数；历史记录里 SDK 丢掉了这些元信息，只能提示发生过压缩。 */
 function appendCompactNotice(meta) {
+  closeToolGroup();
   const parts = [];
   if (!meta) {
     parts.push('上下文已压缩');
@@ -946,6 +1125,7 @@ function appendCompactNotice(meta) {
 
 /** 压缩摘要默认收起，展开后按 Markdown 排版，避免历史里出现一大段无格式文本。 */
 function appendCompactSummary(text) {
+  closeToolGroup();
   const content = text || '';
   const details = document.createElement('details');
   details.className = 'compact-summary';
@@ -968,6 +1148,7 @@ function appendCompactSummary(text) {
 
 /** 后台任务通知等内容很长，收进折叠块，避免历史里出现一大段纯文本。 */
 function appendSystemNote(title, text) {
+  closeToolGroup();
   const content = text || '';
   const details = document.createElement('details');
   details.className = 'system-note';
@@ -1124,6 +1305,7 @@ function handleToolProgress(message) {
 
 function handleResult(message) {
   flushThinking();
+  closeToolGroup();
   finalizeStream();
   clearInsertBadges();
   state.awaitingUser = false;
@@ -1255,6 +1437,10 @@ function handleSessionState(key, payload) {
   if (payload.sessionId) registerSessionKey(key, payload.sessionId);
 
   if (key !== state.activeKey) {
+    // 后台会话已经空闲时，不要把状态灯和“停止按钮”留在 working
+    if (payload.status === 'idle' && state.sessionStatus.get(key) === 'working') {
+      setSessionStatus(key, 'done');
+    }
     if (payload.ended) {
       state.startedKeys.delete(key);
       state.activityByKey.delete(key);
@@ -1269,7 +1455,7 @@ function handleSessionState(key, payload) {
   }
 
   const wasRunning = state.running;
-  if (payload.status === 'starting') setRunning(true);
+  // starting 只是 CLI 在启动/恢复，不代表有回合在跑，不显示停止按钮
   if (payload.status === 'running') setRunning(true);
   if (
     (payload.status === 'starting' || payload.status === 'running') &&
@@ -1278,12 +1464,13 @@ function handleSessionState(key, payload) {
     !hasPendingPlan(key)
   ) {
     // 没有经过 sendMessage 的启动（如恢复会话）也要有可见反馈
-    setActivity('正在处理…');
+    setActivity(payload.status === 'starting' ? '正在恢复会话…' : '正在处理…');
   }
   if (payload.status === 'idle') {
     // 会话结束/报错时收尾，避免思考计时器一直跑
     flushThinking();
     setRunning(false);
+    if (state.sessionStatus.get(key) === 'working') setSessionStatus(key, 'done');
     if (state.activityLabel === '正在停止…') {
       finishActivity('已停止生成', 'stopped');
     } else if (
@@ -1307,6 +1494,7 @@ function handleSessionState(key, payload) {
       if (stopping) finishActivity('已停止生成', 'stopped');
       else handleUnexpectedEnd();
     }
+    closeToolGroup();
     setSessionStatus(key, null);
     state.sessionActive = false;
     clearPrompts(key);
@@ -1324,6 +1512,7 @@ function handleSessionError(key, text) {
     return;
   }
   flushThinking();
+  closeToolGroup();
   finalizeStream();
   clearInsertBadges();
   clearPrompts(key);
@@ -1463,11 +1652,14 @@ function clearActivity() {
 
 /** 把还没拿到结果的工具卡片标成已中断。 */
 function markUnfinishedTools() {
+  const groups = new Set();
   for (const entry of state.toolCards.values()) {
+    if (entry.group) groups.add(entry.group);
     if (entry.hasResult) continue;
     entry.status.className = 'tool-status error';
     entry.status.textContent = '已中断';
   }
+  for (const group of groups) updateToolGroup(group);
 }
 
 /** 会话没给出完成结果就结束了：提示用户，并标记未完成的工具。 */
@@ -1663,13 +1855,16 @@ async function changePermissionMode(mode) {
   ) {
     return;
   }
+  const key = state.activeKey;
   const selected = setPermissionModeUI(mode);
-  if (state.activeKey) state.modeByKey.set(state.activeKey, selected);
+  if (key) state.modeByKey.set(key, selected);
   els.permissionMenu.hidden = true;
   await window.desk.saveSettings({ permissionMode: selected });
-  if (state.sessionActive) {
-    const result = await window.desk.setPermissionMode({ key: state.activeKey, mode: selected });
-    if (!result?.ok) showError(result?.error || '切换权限模式失败');
+  if (key && state.startedKeys.has(key)) {
+    const result = await window.desk.setPermissionMode({ key, mode: selected });
+    if (!result?.ok && state.activeKey === key) {
+      showError(result?.error || '切换权限模式失败');
+    }
   }
 }
 
@@ -1727,6 +1922,8 @@ function resetConversation() {
     </div>`;
   state.streamEl = null;
   state.toolCards.clear();
+  state.toolGroup = null;
+  state.thinkingGroup = null;
   state.planCards.clear();
   state.sessionId = null;
   state.sessionActive = false;
@@ -1738,12 +1935,9 @@ function resetConversation() {
   state.renderTarget = null;
   state.compacting = false;
   state.commands = [];
-  state.attachments = [];
   state.mcpStatus = {};
-  els.input.value = '';
+  restoreDraft(null);
   renderPermissionMode(state.permissionMode);
-  renderAttachments();
-  autosize();
   clearActivity();
   hideSlashPalette();
   updateSessionTitle('');
@@ -2252,6 +2446,181 @@ async function refreshMcp() {
   }
 }
 
+/* ---------------- 运行环境自检 ---------------- */
+
+const ENV_LEVEL_LABEL = { required: '必需', recommended: '建议', optional: '可选' };
+const ENV_DOT_CLASS = {
+  ok: 'connected',
+  warning: 'pending',
+  missing: 'failed',
+  error: 'failed',
+  unknown: '',
+};
+
+function renderEnvItem(item) {
+  const row = document.createElement('div');
+  row.className = 'mcp-item env-item';
+
+  const dot = document.createElement('span');
+  dot.className = `mcp-status${
+    ENV_DOT_CLASS[item.status] ? ` ${ENV_DOT_CLASS[item.status]}` : ''
+  }`;
+  dot.title = item.detail || '';
+
+  const name = document.createElement('span');
+  name.className = 'mcp-name';
+  name.textContent = item.label;
+
+  const level = document.createElement('span');
+  level.className = 'mcp-scope';
+  level.textContent = ENV_LEVEL_LABEL[item.level] || '';
+
+  const version = document.createElement('span');
+  version.className = 'env-version';
+  version.textContent = item.version || '';
+
+  row.append(dot, name, level, version);
+
+  if (Array.isArray(item.actions) && item.actions.length > 0) {
+    const actions = document.createElement('span');
+    actions.className = 'env-actions';
+    for (const action of item.actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'ghost-button env-action';
+      button.textContent = action.label || '处理';
+      button.addEventListener('click', () => runEnvAction(action, button));
+      actions.appendChild(button);
+    }
+    row.appendChild(actions);
+  }
+
+  const detail = document.createElement('span');
+  detail.className = 'env-detail';
+  detail.textContent = item.detail || '';
+  row.appendChild(detail);
+
+  els.envList.appendChild(row);
+}
+
+function renderEnvStatus(result) {
+  els.envList.innerHTML = '';
+  els.envSummary.className = `env-summary ${result.summary.level}`;
+  els.envSummary.textContent = result.summary.text;
+
+  renderEnvItem(result.auth);
+  for (const item of result.components) renderEnvItem(item);
+
+  const notes = Array.isArray(result.summary.notes) ? result.summary.notes : [];
+  els.envNote.hidden = notes.length === 0;
+  els.envNote.textContent = notes.join('；');
+  els.envCheckedAt.textContent = `检查于 ${new Date(result.checkedAt).toLocaleTimeString(
+    'zh-CN',
+    { hour12: false }
+  )}`;
+}
+
+async function refreshEnvStatus() {
+  if (state.envLoading) return;
+  state.envLoading = true;
+  els.envRefresh.disabled = true;
+  els.envSummary.className = 'env-summary';
+  els.envSummary.textContent = '正在检查运行环境…';
+  els.envCheckedAt.textContent = '';
+  els.envNote.hidden = true;
+
+  try {
+    const result = await window.desk.envStatus();
+    if (!result?.ok) throw new Error(result?.error || '检查失败');
+    renderEnvStatus(result);
+  } catch (error) {
+    els.envSummary.className = 'env-summary error';
+    els.envSummary.textContent = `检查失败：${error?.message || error}`;
+    els.envList.innerHTML = '';
+  } finally {
+    state.envLoading = false;
+    els.envRefresh.disabled = false;
+  }
+}
+
+async function runEnvAction(action, button) {
+  button.disabled = true;
+  els.envNote.hidden = false;
+  els.envNote.textContent = '正在执行…';
+  try {
+    const result = await window.desk.envAction(action.id);
+    if (!result?.ok) {
+      els.envNote.textContent = result?.error || '操作失败';
+      return;
+    }
+    els.envNote.textContent = result.message || '已完成';
+    if (result.kind === 'launch') setTimeout(refreshEnvStatus, 2000);
+  } catch (error) {
+    els.envNote.textContent = `操作失败：${error?.message || error}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---------------- 全局工作规范 ---------------- */
+
+function isGlobalRulesDirty() {
+  return els.globalRulesText.value !== state.globalRulesLoadedContent;
+}
+
+async function loadGlobalRules() {
+  if (state.globalRulesLoading) return;
+  state.globalRulesLoading = true;
+  els.globalRulesText.disabled = true;
+  els.globalRulesStatus.textContent = '正在加载…';
+  try {
+    const result = await window.desk.getGlobalRules();
+    if (!result?.ok) throw new Error(result?.error || '读取失败');
+    els.globalRulesText.value = result.content || '';
+    state.globalRulesLoadedContent = els.globalRulesText.value;
+    els.globalRulesStatus.textContent = result.exists
+      ? '已加载'
+      : '文件不存在，保存后会创建';
+  } catch (error) {
+    els.globalRulesStatus.textContent = `加载失败：${error?.message || error}`;
+  } finally {
+    state.globalRulesLoading = false;
+    els.globalRulesText.disabled = false;
+  }
+}
+
+async function saveGlobalRules() {
+  const content = els.globalRulesText.value;
+  if (content === state.globalRulesLoadedContent) {
+    els.globalRulesStatus.textContent = '内容没有变化';
+    return;
+  }
+  els.globalRulesSave.disabled = true;
+  els.globalRulesStatus.textContent = '正在保存…';
+  try {
+    const result = await window.desk.saveGlobalRules(content);
+    if (!result?.ok) throw new Error(result?.error || '保存失败');
+    state.globalRulesLoadedContent = content;
+    els.globalRulesStatus.textContent = result.backup
+      ? '已保存（旧版本备份在 CLAUDE.md.bak）'
+      : '已保存';
+  } catch (error) {
+    els.globalRulesStatus.textContent = `保存失败：${error?.message || error}`;
+  } finally {
+    els.globalRulesSave.disabled = false;
+  }
+}
+
+function canCloseSettings() {
+  if (!isGlobalRulesDirty()) return true;
+  return window.confirm('全局规范还有未保存的修改，确定关闭吗？');
+}
+
+function reloadGlobalRules() {
+  if (isGlobalRulesDirty() && !window.confirm('放弃未保存的修改并重新加载？')) return;
+  loadGlobalRules();
+}
+
 async function createSessionInDir(dir) {
   resetConversation();
   setCwd(dir);
@@ -2485,6 +2854,8 @@ async function resumeSession(session) {
   els.messages.innerHTML = '';
   state.historyView = null;
   state.toolCards.clear();
+  state.toolGroup = null;
+  state.thinkingGroup = null;
   state.planCards.clear();
   state.streamEl = null;
   state.commands = state.commandsByKey.get(key) || [];
@@ -2511,6 +2882,7 @@ async function resumeSession(session) {
   state.pendingEvents = [];
   state.replaying = true;
   const renderedUuids = new Set();
+  let historyFailed = false;
   try {
     let messages = state.historyCache.get(session.sessionId);
     if (messages) {
@@ -2536,6 +2908,15 @@ async function resumeSession(session) {
     renderHistoryWindow(messages, session.sessionId, renderedUuids);
     // 历史里最后一个工具调用没有结果，说明当时被中断了
     markUnfinishedTools();
+  } catch (error) {
+    historyFailed = true;
+    if (token === state.switchToken) {
+      showError(`读取会话历史失败：${error?.message || error}`);
+      setRunning(false);
+      setSessionStatus(key, null);
+      state.sessionActive = false;
+      finishActivity('加载失败', 'error');
+    }
   } finally {
     if (token === state.switchToken) {
       state.replaying = false;
@@ -2558,7 +2939,7 @@ async function resumeSession(session) {
     }
   }
 
-  if (token !== state.switchToken) return;
+  if (historyFailed || token !== state.switchToken) return;
 
   applyPendingPlans(key);
   recalcAwaitingUser();
@@ -2566,6 +2947,10 @@ async function resumeSession(session) {
 
   if (state.startedKeys.has(key)) {
     const focus = await window.desk.focusSession({ key });
+    if (token !== state.switchToken) {
+      if (state.activeKey) window.desk.focusSession({ key: state.activeKey });
+      return;
+    }
     // 后端已被空闲回收：清掉本地标记，下面会重新恢复
     if (focus && focus.attached === false) {
       state.startedKeys.delete(key);
@@ -2573,6 +2958,7 @@ async function resumeSession(session) {
     }
   }
   if (!state.startedKeys.has(key)) {
+    if (token !== state.switchToken) return;
     if (!state.awaitingUser) setActivity('正在恢复会话…');
     const mode = state.modeByKey.get(key) || state.permissionMode;
     state.modeByKey.set(key, mode);
@@ -2585,9 +2971,20 @@ async function resumeSession(session) {
         permissionMode: mode,
       })
     );
+    // 恢复期间用户又切走了：关掉刚启动的后台会话，别把它留在后台
+    if (token !== state.switchToken) {
+      window.desk.closeSession({ key });
+      if (state.activeKey) window.desk.focusSession({ key: state.activeKey });
+      return;
+    }
     if (!result?.ok) {
-      showError(result?.error || '恢复会话失败');
-      if (state.activityLabel === '正在恢复会话…') finishActivity('恢复失败', 'error');
+      setSessionStatus(key, null);
+      if (key === state.activeKey) {
+        setRunning(false);
+        state.sessionActive = false;
+        showError(result?.error || '恢复会话失败');
+        if (state.activityLabel === '正在恢复会话…') finishActivity('恢复失败', 'error');
+      }
     } else {
       state.startedKeys.add(key);
       state.sessionActive = true;
@@ -3182,13 +3579,23 @@ function applyPendingPlans(key) {
   }
 }
 
-function expirePlanCard(record) {
-  if (!record || record.status !== 'pending') return;
+function markPlanExpired(record) {
   record.status = 'expired';
   record.statusEl.textContent = '已失效';
   record.statusEl.className = 'plan-inline-status expired';
   record.actions.hidden = true;
   record.feedbackWrap.hidden = true;
+}
+
+function expirePlanCard(record) {
+  if (!record) return;
+  if (record.status === 'submitting') {
+    // 提交中的卡片等 IPC 返回后再落成“已失效”，不要让它变回“待批准”
+    record.cancelled = true;
+    return;
+  }
+  if (record.status !== 'pending') return;
+  markPlanExpired(record);
 }
 
 async function submitPlanDecision(record, decision) {
@@ -3211,7 +3618,22 @@ async function submitPlanDecision(record, decision) {
     feedback: decision === 'reject' ? feedback : undefined,
   });
 
-  // 等待期间会话结束/被停止：保持“已失效”，不把按钮重新打开
+  // 等待期间会话结束/被停止：按 IPC 结果落成“已批准/已失效”，不要变回“待批准”
+  if (record.cancelled) {
+    record.cancelled = false;
+    if (result?.ok) {
+      record.status = decision === 'approve' ? 'approved' : 'rejected';
+      record.statusEl.textContent = decision === 'approve' ? '已批准' : '已拒绝';
+      record.statusEl.className = `plan-inline-status ${
+        decision === 'approve' ? 'approved' : 'rejected'
+      }`;
+      record.actions.hidden = true;
+      record.feedbackWrap.hidden = true;
+    } else {
+      markPlanExpired(record);
+    }
+    return;
+  }
   if (record.status === 'expired') {
     if (!result?.ok) showError(result?.error || '提交计划审批失败');
     return;
@@ -3614,15 +4036,17 @@ function autosize() {
   els.input.style.height = `${Math.min(els.input.scrollHeight, 220)}px`;
 }
 
+const NEW_DRAFT_KEY = '__composer__';
+
 /** 按会话保存输入框草稿（文字 + 附件），切走不串台。 */
 function saveDraft(key) {
-  if (!key) return;
+  const draftKey = key || NEW_DRAFT_KEY;
   const text = els.input.value;
   if (!text && state.attachments.length === 0) {
-    state.drafts.delete(key);
+    state.drafts.delete(draftKey);
     return;
   }
-  state.drafts.set(key, {
+  state.drafts.set(draftKey, {
     text,
     attachments: state.attachments.slice(),
     start: els.input.selectionStart ?? 0,
@@ -3631,7 +4055,7 @@ function saveDraft(key) {
 }
 
 function restoreDraft(key) {
-  const draft = state.drafts.get(key);
+  const draft = state.drafts.get(key || NEW_DRAFT_KEY);
   els.input.value = draft?.text || '';
   state.attachments = draft ? draft.attachments.slice() : [];
   renderAttachments();
@@ -3646,7 +4070,7 @@ function restoreDraft(key) {
 }
 
 function dropDraft(key) {
-  if (key) state.drafts.delete(key);
+  state.drafts.delete(key || NEW_DRAFT_KEY);
 }
 
 /** 同一个 key 的启动/恢复只跑一次，避免并发 resume 把刚启动的会话又重启。 */
@@ -3708,10 +4132,12 @@ async function sendMessage() {
   if (!text && attachments.length === 0) return;
 
   const viewToken = state.switchToken;
+  const stopSeqAtSend = state.stopSeq;
   state.sending = true;
   try {
     clearError();
     const sendKey = state.activeKey;
+    const fromNewComposer = !sendKey && !state.sessionId;
     const prevStatus = sendKey ? state.sessionStatus.get(sendKey) : null;
     const planWaiting = hasPendingPlan(sendKey);
     if (sendKey && !planWaiting) setSessionStatus(sendKey, 'working');
@@ -3743,6 +4169,11 @@ async function sendMessage() {
       if (sendKey) setSessionStatus(sendKey, prevStatus || null);
       return;
     }
+    // 启动/恢复期间用户点了停止：不要继续发送这条消息
+    if (state.stopSeq !== stopSeqAtSend) {
+      if (sendKey) setSessionStatus(sendKey, prevStatus || null);
+      return;
+    }
     const key = state.activeKey;
     if (!key) return;
 
@@ -3762,10 +4193,12 @@ async function sendMessage() {
       if (state.interruptRequested || state.stoppingKey || state.stopNoticeShown) {
         return;
       }
+      // 发送失败时无论是否已切走，都要清掉这次发送留下的“工作中”状态
+      const stillBusy = prevStatus === 'working' || prevStatus === 'waiting';
+      setSessionStatus(key, prevStatus || null);
       if (key === state.activeKey) {
-        setRunning(false);
-        setSessionStatus(key, null);
-        finishActivity('发送失败', 'error');
+        setRunning(stillBusy);
+        if (!stillBusy) finishActivity('发送失败', 'error');
         showError(result?.error || '发送失败');
       }
       return;
@@ -3774,7 +4207,11 @@ async function sendMessage() {
     // 新消息已经进入这个会话，历史缓存和草稿都作废
     dropHistory(state.keyToSession.get(key) || state.sessionId);
     dropDraft(key);
+    if (fromNewComposer) dropDraft(null);
     if (key !== state.activeKey) return;
+    // 旧回合的 result 可能在 send IPC 返回前到达；这里重新确认新一轮仍在运行
+    setRunning(true);
+    if (!state.awaitingUser && !state.activityStartedAt) setActivity('等待模型响应…');
     appendUserMessage(text, steer, result.uuid || '', attachments);
     // 发送期间用户可能又输入了新内容，只清掉本次发送的部分
     if (els.input.value.trim() === text) els.input.value = '';
@@ -3797,6 +4234,7 @@ async function stopCurrent() {
   if (!key || state.stoppingKey === key) return;
 
   state.stoppingKey = key;
+  state.stopSeq += 1;
   state.interruptRequested = true;
   clearPrompts(key);
 
@@ -3837,6 +4275,8 @@ async function init() {
   const initial = await window.desk.getState();
   if (initial?.ok) {
     state.settings = initial.settings || {};
+    state.conciseMode = initial.settings.conciseMode !== false;
+    els.conciseMode.checked = state.conciseMode;
     state.model = 'default';
     const initialMode = state.settings.permissionMode || 'default';
     const modeValue = PERMISSION_MODES.some((item) => item.value === initialMode)
@@ -3975,7 +4415,7 @@ async function init() {
     if (!els.findBar.hidden) {
       closeFindBar();
     } else if (!els.settingsModal.hidden) {
-      els.settingsModal.hidden = true;
+      if (canCloseSettings()) els.settingsModal.hidden = true;
     } else if (!els.slashPalette.hidden) {
       hideSlashPalette();
     } else if (!els.questionModal.hidden) {
@@ -4014,13 +4454,28 @@ async function init() {
   $('open-settings').addEventListener('click', () => {
     els.settingsModal.hidden = false;
     refreshMcp();
+    refreshEnvStatus();
+    loadGlobalRules();
   });
   els.mcpRefresh.addEventListener('click', refreshMcp);
+  els.envRefresh.addEventListener('click', refreshEnvStatus);
+  els.globalRulesSave.addEventListener('click', saveGlobalRules);
+  els.globalRulesReload.addEventListener('click', reloadGlobalRules);
+  els.globalRulesText.addEventListener('input', () => {
+    if (isGlobalRulesDirty()) els.globalRulesStatus.textContent = '有未保存的修改';
+  });
+  els.conciseMode.addEventListener('change', () => {
+    state.conciseMode = els.conciseMode.checked;
+    closeToolGroup();
+    window.desk.saveSettings({ conciseMode: state.conciseMode });
+  });
   $('settings-close').addEventListener('click', () => {
-    els.settingsModal.hidden = true;
+    if (canCloseSettings()) els.settingsModal.hidden = true;
   });
   els.settingsModal.addEventListener('click', (event) => {
-    if (event.target === els.settingsModal) els.settingsModal.hidden = true;
+    if (event.target === els.settingsModal && canCloseSettings()) {
+      els.settingsModal.hidden = true;
+    }
   });
 
   els.fontSize.addEventListener('input', () => {
@@ -4075,11 +4530,13 @@ async function init() {
   window.desk.onSessionReleased(({ key }) => {
     if (!key) return;
     state.startedKeys.delete(key);
+    state.activityByKey.delete(key);
     if (state.activeKey === key) {
       state.sessionActive = false;
+      setRunning(false);
       if (!hasPendingPlan(key) && !state.awaitingUser) clearActivity();
-      setSessionStatus(key, null);
     }
+    setSessionStatus(key, null);
   });
   window.desk.onNewSession(newSession);
   window.desk.onPickDirectory(async () => {

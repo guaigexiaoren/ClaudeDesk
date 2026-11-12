@@ -819,6 +819,103 @@ select:hover {
   overflow: hidden;
 }
 
+.tool-group {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.tool-group > summary {
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tool-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-group > summary::before {
+  content: '▸ ';
+  color: var(--faint);
+}
+
+.tool-group[open] > summary::before {
+  content: '▾ ';
+}
+
+.tool-group > summary.running {
+  color: var(--yellow);
+}
+
+.tool-group > summary.error {
+  color: var(--red);
+}
+
+.tool-group-body {
+  border-top: 1px solid var(--border);
+  padding: 4px 10px 10px;
+}
+
+.tool-group-body .tool-card {
+  margin: 8px 0 0;
+  background: var(--panel);
+}
+
+.thinking-group {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.thinking-group > summary {
+  padding: 8px 14px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.thinking-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-group > summary::before {
+  content: '▸ ';
+  color: var(--faint);
+}
+
+.thinking-group[open] > summary::before {
+  content: '▾ ';
+}
+
+.thinking-group-body {
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  max-height: 48vh;
+  overflow-y: auto;
+}
+
+.thinking-segment {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.thinking-segment + .thinking-segment {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
 .tool-head {
   display: flex;
   align-items: center;
@@ -1530,6 +1627,19 @@ select:hover {
   accent-color: var(--accent);
 }
 
+.setting-row input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.settings-card {
+  width: min(680px, calc(100vw - 80px));
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+}
+
 .accent-swatches {
   display: flex;
   gap: 8px;
@@ -1616,6 +1726,98 @@ select:hover {
   align-self: flex-start;
   padding: 4px 10px;
   font-size: 12px;
+}
+
+/* 运行环境自检 */
+
+.env-row {
+  align-items: flex-start;
+}
+
+.env-summary {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.env-summary.ok {
+  color: var(--green);
+}
+
+.env-summary.warning {
+  color: var(--yellow);
+}
+
+.env-summary.error {
+  color: var(--red);
+}
+
+.env-list {
+  max-height: 280px;
+}
+
+.env-item {
+  flex-wrap: wrap;
+}
+
+.env-version {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  flex: none;
+}
+
+.env-detail {
+  flex: 1 1 100%;
+  padding-left: 16px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.env-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.env-action {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+.env-checked-at,
+.env-note {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.rules-text {
+  width: 100%;
+  min-height: 220px;
+  max-height: 45vh;
+  resize: vertical;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  outline: none;
+}
+
+.rules-text:focus {
+  border-color: var(--accent-border);
+}
+
+.rules-text:disabled {
+  opacity: 0.7;
 }
 
 .swatch {

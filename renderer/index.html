@@ -191,11 +191,48 @@
           <input id="font-size" type="range" min="12" max="20" step="1" />
           <span id="font-size-value" class="setting-value">14</span>
         </label>
+        <label class="setting-row">
+          <span>简洁对话</span>
+          <input id="concise-mode" type="checkbox" />
+          <span class="setting-value">折叠工具调用，只留结果</span>
+        </label>
+        <div class="setting-row mcp-row rules-row">
+          <span>全局规范</span>
+          <div class="mcp-panel">
+            <textarea
+              id="global-rules-text"
+              class="rules-text"
+              rows="10"
+              spellcheck="false"
+              placeholder="正在加载…"
+            ></textarea>
+            <div class="env-actions">
+              <button id="global-rules-save" class="ghost-button mcp-refresh">保存</button>
+              <button id="global-rules-reload" class="ghost-button mcp-refresh">重新加载</button>
+              <span id="global-rules-status" class="env-checked-at"></span>
+            </div>
+            <div class="env-note">
+              这是 Claude Code 的全局用户记忆文件 ~/.claude/CLAUDE.md，终端版也会读取。修改后对新建/恢复的会话生效；已在运行的会话需要重新打开。
+            </div>
+          </div>
+        </div>
         <div class="setting-row mcp-row">
           <span>MCP</span>
           <div class="mcp-panel">
             <div id="mcp-list" class="mcp-list"></div>
             <button id="mcp-refresh" class="ghost-button mcp-refresh">刷新状态</button>
+          </div>
+        </div>
+        <div class="setting-row mcp-row env-row">
+          <span>运行环境</span>
+          <div class="mcp-panel">
+            <div id="env-summary" class="env-summary">尚未检查</div>
+            <div id="env-list" class="mcp-list env-list"></div>
+            <div class="env-actions">
+              <button id="env-refresh" class="ghost-button mcp-refresh">重新检查</button>
+              <span id="env-checked-at" class="env-checked-at"></span>
+            </div>
+            <div id="env-note" class="env-note" hidden></div>
           </div>
         </div>
         <div class="setting-row">
