@@ -56,11 +56,21 @@ class SessionManager extends EventEmitter {
     this.sessionId = null;
     this.cwd = null;
     this.model = null;
+    this.permissionMode = 'default';
     this.status = 'idle';
     this.pendingPermissions = new Map();
     this.starting = false;
     this.cancelStart = false;
     this.closedByUser = false;
+    // 用量记录用的供应商快照：会话启动后不随设置页切换而改变
+    this.providerName = '系统 / CC Switch';
+    this.providerPricing = null;
+    this.providerMultiplier = 1;
+    this.providerProfile = null;
+    this.resumed = false;
+    this.costBaseline = undefined;
+    this.modelUsagePrev = undefined;
+    this.modelUsagePrevByModel = new Map();
   }
 
   _emitState(extra = {}) {
@@ -73,7 +83,19 @@ class SessionManager extends EventEmitter {
     });
   }
 
-  async start({ cwd, model, permissionMode, resume } = {}) {
+  async start({
+    cwd,
+    model,
+    permissionMode,
+    resume,
+    envOverrides,
+    envUnset,
+    providerName,
+    providerPricing,
+    providerMultiplier,
+    providerProfile,
+    providerSettings,
+  } = {}) {
     if (this.starting) throw new Error('会话正在启动中');
     if (this.closedByUser) return { ok: false, error: '会话已关闭' };
     this.starting = true;
@@ -88,10 +110,26 @@ class SessionManager extends EventEmitter {
 
       this.cwd = cwd || process.cwd();
       this.model = model && model !== 'default' ? model : null;
+      this.permissionMode = permissionMode || 'default';
       this.sessionId = resume || null;
       this.status = 'starting';
       this.queue = new MessageQueue();
       this.controller = new AbortController();
+      this.providerName = providerName || '系统 / CC Switch';
+      this.providerPricing = providerPricing || null;
+      this.providerMultiplier = Number(providerMultiplier) || 1;
+      this.providerProfile = providerProfile || null;
+      this.resumed = Boolean(resume);
+      this.costBaseline = undefined;
+      this.modelUsagePrev = undefined;
+      this.modelUsagePrevByModel = new Map();
+
+      const baseEnv = {
+        ...process.env,
+        CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
+        CLAUDE_AGENT_SDK_CLIENT_APP: 'claude-desk/1.0.0',
+      };
+      for (const name of envUnset || []) delete baseEnv[name];
 
       const options = {
         cwd: this.cwd,
@@ -100,16 +138,16 @@ class SessionManager extends EventEmitter {
         enableFileCheckpointing: true,
         abortController: this.controller,
         settingSources: ['user', 'project', 'local'],
-        env: withDarwinPath({
-          ...process.env,
-          CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
-          CLAUDE_AGENT_SDK_CLIENT_APP: 'claude-desk/1.0.0',
-        }),
+        env: withDarwinPath({ ...baseEnv, ...(envOverrides || {}) }),
         stderr: (data) => this.emit('stderr', data),
         canUseTool: (toolName, input, opts) => this._askPermission(toolName, input, opts),
       };
       if (this.model) options.model = this.model;
       if (resume) options.resume = resume;
+      if (providerSettings && typeof providerSettings === 'object') {
+        // flag 设置层优先于用户 ~/.claude/settings.json，避免 CC Switch 的 env 覆盖供应商配置
+        options.settings = providerSettings;
+      }
       if (this.claudeExecutable) options.pathToClaudeCodeExecutable = this.claudeExecutable;
       // 始终允许切换到「全部放行」：不传这个标志时，会话中途 setPermissionMode('bypassPermissions') 会被 CLI 忽略
       options.allowDangerouslySkipPermissions = true;
@@ -217,6 +255,14 @@ class SessionManager extends EventEmitter {
   }
 
   _askPermission(toolName, input, opts = {}) {
+    // 计划模式下普通工具权限不打断用户；计划提交本身（ExitPlanMode）和提问仍走对应事件。
+    if (
+      this.permissionMode === 'plan' &&
+      toolName !== 'ExitPlanMode' &&
+      toolName !== 'AskUserQuestion'
+    ) {
+      return Promise.resolve({ behavior: 'allow' });
+    }
     return new Promise((resolve) => {
       const id = randomUUID();
       this.pendingPermissions.set(id, { resolve, input, suggestions: opts.suggestions });
@@ -323,7 +369,9 @@ class SessionManager extends EventEmitter {
 
   async setPermissionMode(mode) {
     if (!this.query) throw new Error('会话尚未启动');
-    await this.query.setPermissionMode(mode);
+    const next = mode || 'default';
+    await this.query.setPermissionMode(next);
+    this.permissionMode = next;
     return { ok: true };
   }
 

@@ -3,7 +3,6 @@ release/
 dist/
 renderer/bundle.js
 renderer/bundle.css
-renderer/xterm.bundle.js
 renderer/highlight.bundle.js
 *.log
 .DS_Store

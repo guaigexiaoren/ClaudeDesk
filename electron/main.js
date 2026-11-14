@@ -2,24 +2,43 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const {
   app,
   BrowserWindow,
   Menu,
   Tray,
-  clipboard,
   dialog,
   globalShortcut,
   ipcMain,
   nativeImage,
+  net,
+  safeStorage,
   screen,
   shell,
 } = require('electron');
 
 const { Store } = require('./store');
 const { SessionManager } = require('./session');
-const { TerminalSession } = require('./terminal');
+const { ProviderStore, buildProviderEnv } = require('./provider-store');
+const {
+  appendUsage,
+  readUsage,
+  summarize,
+  rangeSince,
+  costFromUsage,
+  usageFromResult,
+  usageFromModelUsage,
+  aggregateModelUsage,
+  diffUsage,
+} = require('./usage-log');
+const {
+  MODELS_DEV_URL,
+  MODELS_DEV_REFRESH_MS,
+  ModelsDevPricingStore,
+  resolvePricing,
+  deepSeekSlot,
+} = require('./pricing');
 const {
   collectEnvStatus,
   resolveEnvAction,
@@ -31,6 +50,14 @@ const {
 } = require('./env-status');
 const { readClaudeMd, writeClaudeMd } = require('./global-rules');
 const { withDarwinPath } = require('./platform-path');
+const { addMcpServer, removeMcpServer } = require('./mcp-config');
+const { findSessionTranscript, readPreCompactPage } = require('./transcript');
+const {
+  skillsRoot,
+  listSkills,
+  installSkillFromDir,
+  removeSkill,
+} = require('./skills');
 
 const IS_SMOKE =
   process.argv.includes('--smoke') ||
@@ -53,10 +80,12 @@ let mainWindow = null;
 let quickWindow = null;
 let tray = null;
 let store = null;
+let providerStore = null;
+let pricingStore = null;
+let usageFile = '';
 // 多个对话可以同时运行：key 由渲染进程生成，每个 key 对应一个独立的会话进程
 const sessions = new Map();
 let focusedKey = null;
-let terminal = null;
 let isQuitting = false;
 let idleTimer = null;
 const QUICK_SHORTCUT =
@@ -512,11 +541,11 @@ async function runUiSmoke() {
   await new Promise((resolve) => setTimeout(resolve, 600));
 
   const question = await wc.executeJavaScript(`(() => {
-    const modal = document.getElementById('question-modal');
+    const panel = document.getElementById('question-review');
     const options = document.querySelectorAll('#question-list .option').length;
     const first = document.querySelector('#question-list input[type=radio]');
     if (first) first.checked = true;
-    return JSON.stringify({ visible: !modal.hidden, options });
+    return JSON.stringify({ visible: !panel.hidden, options });
   })()`);
   await wc.executeJavaScript(`document.getElementById('question-submit').click()`);
   await new Promise((resolve) => setTimeout(resolve, 300));
@@ -619,8 +648,8 @@ async function runQuestionSmoke() {
 
     if (!asked) {
       const info = await wc.executeJavaScript(`(() => {
-        const modal = document.getElementById('question-modal');
-        if (!modal || modal.hidden) return null;
+        const panel = document.getElementById('question-review');
+        if (!panel || panel.hidden) return null;
         const options = document.querySelectorAll('#question-list input[type=radio]');
         const labels = [...options].map((option) => option.value);
         if (options[0]) options[0].checked = true;
@@ -787,6 +816,255 @@ function resolveClaudeExecutable() {
   );
 }
 
+async function fetchModelsDevRaw() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const response = await net.fetch(MODELS_DEV_URL, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error(`models.dev 返回 HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function syncModelsDevPricing(force = false) {
+  if (!pricingStore) return { ok: false, error: '价格模块尚未就绪' };
+  if (!force && pricingStore.isFresh(MODELS_DEV_REFRESH_MS)) {
+    return { ok: true, skipped: true, status: pricingStore.status() };
+  }
+  try {
+    const status = await pricingStore.sync(fetchModelsDevRaw);
+    return { ok: true, skipped: false, status };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || String(error),
+      status: pricingStore.status(),
+    };
+  }
+}
+
+// 自定义供应商常把 Claude 模型名映射到 1M 上下文模型（如 deepseek-flash）。
+// CLI 不认识这些模型名，自动压缩窗口会贴着 1M 硬上限；长回合里的工具结果可能在
+// 两次压缩检查之间把请求顶过硬上限。显式压到 700K，给 32K completion 和长回合留足余量；
+// 模型窗口更小时 CLI 会自动截断。
+const PROVIDER_AUTO_COMPACT_WINDOW = 700_000;
+
+function getProviderRuntime() {
+  const active = providerStore ? providerStore.getActive() : null;
+  if (!active) {
+    return {
+      envOverrides: {},
+      envUnset: [],
+      providerName: '系统 / CC Switch',
+      providerPricing: null,
+      providerMultiplier: 1,
+      providerProfile: null,
+      providerSettings: null,
+    };
+  }
+  const env = buildProviderEnv(active.profile, active.key);
+  return {
+    envOverrides: env.overrides,
+    envUnset: env.unset,
+    providerName: active.profile.name,
+    providerPricing: active.profile.pricing,
+    providerMultiplier: active.profile.costMultiplier,
+    providerProfile: {
+      name: active.profile.name,
+      baseUrl: active.profile.baseUrl,
+      models: active.profile.models,
+    },
+    // --settings/SDK 的 flag 层优先级高于用户 settings.json，用同一份 env 覆盖 CC Switch 配置
+    providerSettings: {
+      env: env.overrides,
+      autoCompactWindow: PROVIDER_AUTO_COMPACT_WINDOW,
+    },
+  };
+}
+
+function usageTokenTotal(usage) {
+  return (
+    (Number(usage?.input) || 0) +
+    (Number(usage?.output) || 0) +
+    (Number(usage?.cacheRead) || 0) +
+    (Number(usage?.cacheWrite) || 0)
+  );
+}
+
+/** 每个回合的 result 消息记一条本地用量日志。 */
+function recordUsage(key, manager, message) {
+  if (!message || message.type !== 'result') return;
+  try {
+    const durationMs = Number(message.duration_ms) || 0;
+    // 按回合开始时间判断 DeepSeek 峰谷，和 Codex 的 trace 起点一致
+    const at = Date.now() - Math.max(0, durationMs);
+    const resultUsage = usageFromResult(message.usage);
+    const current = aggregateModelUsage(message.modelUsage);
+    const modelUsage = message.modelUsage || {};
+    const modelKeys = Object.keys(modelUsage);
+    const primaryModel = manager.model || modelKeys[0] || 'unknown';
+    const currentByModel = {};
+    for (const [modelId, value] of Object.entries(modelUsage)) {
+      if (!value || typeof value !== 'object') continue;
+      currentByModel[modelId] = usageFromModelUsage(value);
+    }
+
+    let tokens;
+    let deltaByModel = {};
+    let partial = false;
+    if (manager.modelUsagePrev === undefined) {
+      manager.modelUsagePrev = current;
+      for (const [modelId, value] of Object.entries(currentByModel)) {
+        manager.modelUsagePrevByModel.set(modelId, value);
+      }
+      if (manager.resumed) {
+        // 恢复会话的第一条 result 是累计值；这一回合只能用主循环的 per-turn usage
+        tokens = resultUsage;
+        deltaByModel = { [primaryModel]: { ...resultUsage } };
+        partial = true;
+      } else {
+        tokens = current;
+        deltaByModel = { ...currentByModel };
+      }
+    } else {
+      tokens = diffUsage(current, manager.modelUsagePrev);
+      for (const [modelId, value] of Object.entries(currentByModel)) {
+        const previous = manager.modelUsagePrevByModel.get(modelId);
+        deltaByModel[modelId] = previous ? diffUsage(value, previous) : { ...value };
+        manager.modelUsagePrevByModel.set(modelId, value);
+      }
+      manager.modelUsagePrev = current;
+    }
+    if (usageTokenTotal(tokens) === 0 && usageTokenTotal(resultUsage) > 0) {
+      // 兼容不返回 modelUsage 的旧版本/异常结果
+      tokens = resultUsage;
+      deltaByModel = { [primaryModel]: { ...resultUsage } };
+    }
+
+    let costUsd = null;
+    let priceSource = null;
+    let timeSlot = null;
+    let priceDiscount = null;
+    if (manager.providerProfile || manager.providerPricing) {
+      let totalCost = 0;
+      let pricedModels = 0;
+      let complete = true;
+      let firstResolved = null;
+      for (const [modelId, delta] of Object.entries(deltaByModel)) {
+        if (usageTokenTotal(delta) <= 0) continue;
+        let resolved = resolvePricing({
+          provider: manager.providerProfile,
+          modelId,
+          at,
+          store: pricingStore,
+          manualPricing: manager.providerPricing,
+        });
+        const canonicalModel = modelUsage[modelId]?.canonicalModel;
+        if (!resolved && canonicalModel) {
+          resolved = resolvePricing({
+            provider: manager.providerProfile,
+            modelId: canonicalModel,
+            at,
+            store: pricingStore,
+            manualPricing: manager.providerPricing,
+          });
+        }
+        if (!firstResolved) firstResolved = resolved;
+        if (!resolved) {
+          complete = false;
+          continue;
+        }
+        const cost = costFromUsage(delta, resolved.pricing, manager.providerMultiplier);
+        if (cost === null) {
+          complete = false;
+          continue;
+        }
+        totalCost += cost;
+        pricedModels += 1;
+      }
+      if (pricedModels > 0) costUsd = complete ? totalCost : null;
+      if (firstResolved) {
+        priceSource = firstResolved.source;
+        timeSlot = firstResolved.slot || null;
+        priceDiscount = firstResolved.discount ?? null;
+      }
+    } else {
+      const total = Number(message.total_cost_usd);
+      if (Number.isFinite(total)) {
+        if (manager.costBaseline === undefined) {
+          // 恢复会话时，累计成本包含恢复前的历史，只建立基线不记这一次
+          manager.costBaseline = total;
+          costUsd = manager.resumed ? null : total;
+        } else {
+          costUsd = Math.max(0, total - manager.costBaseline);
+          manager.costBaseline = total;
+        }
+      }
+      priceSource = 'sdk';
+    }
+
+    appendUsage(usageFile, {
+      t: Date.now(),
+      sessionId: manager.sessionId || '',
+      key,
+      provider: manager.providerName || '系统 / CC Switch',
+      model: primaryModel,
+      input: tokens.input,
+      output: tokens.output,
+      cacheRead: tokens.cacheRead,
+      cacheWrite: tokens.cacheWrite,
+      partial,
+      costUsd,
+      priceSource,
+      timeSlot,
+      priceDiscount,
+      durationMs,
+      ttftMs: Number.isFinite(Number(message.ttft_ms)) ? Number(message.ttft_ms) : null,
+      ok: !message.is_error,
+    });
+  } catch (err) {
+    console.error('[usage] 记录用量失败:', err);
+  }
+}
+
+function scheduleTempCleanup(dir, attempts = 6) {
+  const timer = setTimeout(() => {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 });
+    } catch (err) {
+      if (attempts > 1) scheduleTempCleanup(dir, attempts - 1);
+      else console.error('[skills] 清理临时目录失败:', err?.message || err);
+    }
+  }, 800);
+  timer.unref?.();
+}
+
+function runGit(args, timeout = 180_000) {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, {
+      timeout,
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+      env: withDarwinPath(process.env),
+    }, (err, stdout, stderr) => {
+      if (err) {
+        const text = String(stderr || err.message || '')
+          .replace(/https:\/\/[^\s]+@/g, 'https://***@')
+          .trim()
+          .slice(-500);
+        reject(new Error(text || 'git 命令执行失败'));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
 function createSessionManager(key) {
   const manager = new SessionManager({ claudeExecutable: resolveClaudeExecutable() });
   manager.lastActiveAt = Date.now();
@@ -800,6 +1078,7 @@ function createSessionManager(key) {
   });
   manager.on('message', (message) => {
     touch();
+    recordUsage(key, manager, message);
     send('session:event', { key, message });
   });
   manager.on('permission', (request) => {
@@ -1095,38 +1374,6 @@ function registerIpc() {
   );
 
   ipcMain.handle(
-    'pty:start',
-    safe(async ({ cwd, cols, rows } = {}) =>
-      terminal.start({
-        cwd,
-        cols,
-        rows,
-        onData: (data) => send('pty:data', { data }),
-        onExit: (info) => send('pty:exit', info),
-      })
-    )
-  );
-
-  ipcMain.handle('pty:write', safe(async ({ data } = {}) => terminal.write(data)));
-  ipcMain.handle(
-    'pty:resize',
-    safe(async ({ cols, rows } = {}) => terminal.resize(cols, rows))
-  );
-  ipcMain.handle('pty:stop', safe(async () => terminal.stop()));
-
-  ipcMain.handle(
-    'clipboard:read',
-    safe(async () => ({ ok: true, text: clipboard.readText() }))
-  );
-  ipcMain.handle(
-    'clipboard:write',
-    safe(async ({ text } = {}) => {
-      clipboard.writeText(String(text ?? ''));
-      return { ok: true };
-    })
-  );
-
-  ipcMain.handle(
     'quick:submit',
     safe(async ({ text } = {}) => {
       const value = String(text || '').trim();
@@ -1160,6 +1407,30 @@ function registerIpc() {
         gitBranch: s.gitBranch,
       }));
       return { ok: true, sessions: mapped };
+    })
+  );
+
+  ipcMain.handle(
+    'session:history-precompact',
+    safe(async ({ sessionId, offset = 0, limit = 100 } = {}) => {
+      const found = findSessionTranscript(app.getPath('home'), sessionId);
+      if (!found) {
+        return {
+          ok: true,
+          available: false,
+          total: 0,
+          messages: [],
+          hasMore: false,
+          nextOffset: 0,
+        };
+      }
+      const page = readPreCompactPage(found.file, { offset, limit });
+      return {
+        ok: true,
+        available: true,
+        ...page,
+        messages: page.messages.map(trimHistoryMessage),
+      };
     })
   );
 
@@ -1257,20 +1528,195 @@ function registerIpc() {
   );
 
   ipcMain.handle(
+    'mcp:add',
+    safe(async ({ name, type, command, args, url, env, headers } = {}) => {
+      const result = addMcpServer(app.getPath('home'), {
+        name,
+        type,
+        command,
+        args,
+        url,
+        env,
+        headers,
+      });
+      return { ok: true, ...result };
+    })
+  );
+
+  ipcMain.handle(
+    'mcp:remove',
+    safe(async ({ name } = {}) => {
+      const result = removeMcpServer(app.getPath('home'), name);
+      return { ok: true, ...result };
+    })
+  );
+
+  ipcMain.handle(
+    'skills:list',
+    safe(async () => ({
+      ok: true,
+      skills: listSkills(app.getPath('home')),
+      root: skillsRoot(app.getPath('home')),
+    }))
+  );
+
+  ipcMain.handle(
+    'skills:add',
+    safe(async ({ repoUrl, subpath } = {}) => {
+      const url = String(repoUrl || '').trim();
+      if (!/^https:\/\/\S+$/i.test(url) && !/^git@[^:\s]+:\S+$/i.test(url)) {
+        return { ok: false, error: '只支持 https:// 或 git@ 开头的 Git 仓库地址' };
+      }
+      if (/^https:\/\//i.test(url)) {
+        const parsed = new URL(url);
+        if (parsed.username || parsed.password) {
+          return { ok: false, error: '仓库地址不要包含用户名或密码' };
+        }
+      }
+      const tempDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'claudedesk-skill-'));
+      try {
+        await runGit(['clone', '--depth', '1', '--', url, tempDir]);
+        const installed = installSkillFromDir(app.getPath('home'), tempDir, subpath || '');
+        return { ok: true, ...installed };
+      } finally {
+        // Windows 上 git 刚结束时可能还占着目录；异步多试几次，别阻塞安装结果
+        scheduleTempCleanup(tempDir);
+      }
+    })
+  );
+
+  ipcMain.handle(
+    'skills:remove',
+    safe(async ({ name } = {}) => {
+      const result = removeSkill(app.getPath('home'), name);
+      return { ok: true, ...result };
+    })
+  );
+
+  ipcMain.handle(
+    'provider:list',
+    safe(async () => {
+      if (!providerStore) return { ok: true, activeId: '', profiles: [] };
+      return { ok: true, ...providerStore.list() };
+    })
+  );
+
+  ipcMain.handle(
+    'provider:save',
+    safe(async ({ profile, key, clearKey } = {}) => {
+      if (!providerStore) return { ok: false, error: '供应商模块尚未就绪' };
+      const saved = providerStore.save(profile, { key, clearKey: Boolean(clearKey) });
+      return { ok: true, profile: saved, ...providerStore.list() };
+    })
+  );
+
+  ipcMain.handle(
+    'provider:remove',
+    safe(async ({ id } = {}) => {
+      if (!providerStore) return { ok: false, error: '供应商模块尚未就绪' };
+      if (!id) return { ok: false, error: '缺少供应商 ID' };
+      return { ok: true, ...providerStore.remove(id) };
+    })
+  );
+
+  ipcMain.handle(
+    'provider:activate',
+    safe(async ({ id } = {}) => {
+      if (!providerStore) return { ok: false, error: '供应商模块尚未就绪' };
+      return { ok: true, ...providerStore.activate(id || '') };
+    })
+  );
+
+  ipcMain.handle(
+    'pricing:status',
+    safe(async () => ({
+      ok: true,
+      status: pricingStore
+        ? pricingStore.status()
+        : { fetchedAt: 0, count: 0, lastError: null, syncing: false, deepseek: deepSeekSlot(Date.now()) },
+    }))
+  );
+
+  ipcMain.handle('pricing:sync', safe(async () => syncModelsDevPricing(true)));
+
+  ipcMain.handle(
+    'usage:last-turn',
+    safe(async ({ sessionId } = {}) => {
+      if (!sessionId) return { ok: true, turn: null };
+      const entries = readUsage(usageFile).filter(
+        (entry) => entry.sessionId === sessionId && Number(entry.durationMs) > 0
+      );
+      const last = entries.reduce(
+        (latest, entry) => (!latest || entry.t > latest.t ? entry : latest),
+        null
+      );
+      return {
+        ok: true,
+        turn: last
+          ? {
+              durationMs: Number(last.durationMs),
+              t: last.t,
+              model: last.model || '',
+              costUsd: typeof last.costUsd === 'number' ? last.costUsd : null,
+            }
+          : null,
+      };
+    })
+  );
+
+  ipcMain.handle(
+    'usage:stats',
+    safe(async ({ range, start, end } = {}) => {
+      const normalized = ['today', '7d', '30d', 'all', 'custom'].includes(range)
+        ? range
+        : '7d';
+      let since = rangeSince(normalized);
+      let until = Infinity;
+      if (normalized === 'custom') {
+        since = Number(start);
+        until = Number(end);
+        if (!Number.isFinite(since) || !Number.isFinite(until) || until < since) {
+          return { ok: false, error: '时间范围不合法' };
+        }
+      }
+      const entries = readUsage(usageFile, { since, until });
+      entries.sort((a, b) => a.t - b.t);
+      return {
+        ok: true,
+        range: normalized,
+        summary: summarize(entries),
+        entries: entries.slice(-200).reverse(),
+      };
+    })
+  );
+
+  ipcMain.handle(
     'env:status',
-    safe(async () =>
-      collectEnvStatus({
+    safe(async () => {
+      const providerList = providerStore
+        ? providerStore.list()
+        : { activeId: '', profiles: [] };
+      const active = providerList.profiles.find((item) => item.id === providerList.activeId);
+      const activeProvider = active
+        ? {
+            name: active.name,
+            baseUrl: active.baseUrl,
+            hasKey: active.hasKey,
+          }
+        : null;
+      return collectEnvStatus({
         home: app.getPath('home'),
         cwd: store.get().cwd || app.getPath('home'),
         platform: process.platform,
         isPackaged: app.isPackaged,
         env: process.env,
+        activeProvider,
         localAppData: process.env.LOCALAPPDATA,
         programFiles: process.env.ProgramFiles,
         programFilesX86: process.env['ProgramFiles(x86)'],
         resolveBundledClaude: resolveBundledClaudeForEnv,
-      })
-    )
+      });
+    })
   );
 
   ipcMain.handle(
@@ -1352,7 +1798,8 @@ function registerIpc() {
       if (!manager) manager = createSessionManager(key);
       else await manager.close();
       focusedKey = key;
-      const result = await manager.start({ ...payload });
+      const runtime = getProviderRuntime();
+      const result = await manager.start({ ...payload, ...runtime });
       const patch = { cwd: payload?.cwd || store.get().cwd };
       if (payload?.model) patch.model = payload.model;
       if (payload?.permissionMode) patch.permissionMode = payload.permissionMode;
@@ -1369,7 +1816,14 @@ function registerIpc() {
       if (!manager) manager = createSessionManager(key);
       else await manager.close();
       focusedKey = key;
-      const result = await manager.start({ cwd, model, permissionMode, resume: sessionId });
+      const runtime = getProviderRuntime();
+      const result = await manager.start({
+        cwd,
+        model,
+        permissionMode,
+        resume: sessionId,
+        ...runtime,
+      });
       store.merge({ cwd: cwd || store.get().cwd, lastSessionId: sessionId });
       return result;
     })
@@ -1405,9 +1859,13 @@ function registerIpc() {
   ipcMain.handle(
     'session:set-permission-mode',
     safe(async ({ key, mode } = {}) => {
-      store.merge({ permissionMode: mode });
       const manager = getSessionManager(key);
-      return manager ? manager.setPermissionMode(mode) : { ok: true };
+      if (manager) {
+        const result = await manager.setPermissionMode(mode);
+        if (!result?.ok) return result;
+      }
+      store.merge({ permissionMode: mode });
+      return { ok: true };
     })
   );
 
@@ -1555,11 +2013,36 @@ if (!gotLock) {
   app.whenReady().then(() => {
     app.setAppUserModelId('com.yymy.claudedesk');
     store = new Store(app.getPath('userData'));
-    terminal = new TerminalSession();
+    providerStore = new ProviderStore({
+      dir: app.getPath('userData'),
+      encrypt: (value) => {
+        if (!safeStorage.isEncryptionAvailable()) {
+          throw new Error('当前系统不支持安全存储，无法保存 API Key');
+        }
+        return safeStorage.encryptString(value).toString('base64');
+      },
+      decrypt: (value) => {
+        if (!safeStorage.isEncryptionAvailable()) {
+          throw new Error('当前系统不支持安全存储，无法读取 API Key');
+        }
+        return safeStorage.decryptString(Buffer.from(value, 'base64'));
+      },
+    });
+    usageFile = path.join(app.getPath('userData'), 'usage.jsonl');
+    pricingStore = new ModelsDevPricingStore(app.getPath('userData'));
     registerIpc();
     buildMenu();
     createWindow();
     startIdleReaper();
+    if (!IS_SMOKE) {
+      setTimeout(() => {
+        syncModelsDevPricing(false).catch(() => {});
+      }, 1500).unref?.();
+      const pricingTimer = setInterval(() => {
+        syncModelsDevPricing(false).catch(() => {});
+      }, MODELS_DEV_REFRESH_MS);
+      pricingTimer.unref?.();
+    }
 
     if (!IS_SMOKE) {
       try {
@@ -1590,7 +2073,6 @@ if (!gotLock) {
       clearInterval(idleTimer);
       idleTimer = null;
     }
-    if (terminal) terminal.stop();
     closeAllSessions();
   });
 }

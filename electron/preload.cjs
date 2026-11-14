@@ -21,14 +21,6 @@ contextBridge.exposeInMainWorld('desk', {
   showInFolder: (target) => ipcRenderer.invoke('shell:show-in-folder', target),
   saveText: (options) => ipcRenderer.invoke('dialog:save-text', options),
 
-  // 终端
-  ptyStart: (options) => ipcRenderer.invoke('pty:start', options),
-  ptyWrite: (data) => ipcRenderer.invoke('pty:write', { data }),
-  ptyResize: (options) => ipcRenderer.invoke('pty:resize', options),
-  ptyStop: () => ipcRenderer.invoke('pty:stop'),
-  readClipboard: () => ipcRenderer.invoke('clipboard:read'),
-  writeClipboard: (text) => ipcRenderer.invoke('clipboard:write', { text }),
-
   // 快速窗口
   quickSubmit: (text) => ipcRenderer.invoke('quick:submit', { text }),
   hideQuick: () => ipcRenderer.invoke('quick:hide'),
@@ -36,14 +28,32 @@ contextBridge.exposeInMainWorld('desk', {
   // 会话
   listSessions: (options) => ipcRenderer.invoke('session:list', options),
   getHistory: (options) => ipcRenderer.invoke('session:history', options),
+  getPreCompactHistory: (options) => ipcRenderer.invoke('session:history-precompact', options),
   deleteSession: (options) => ipcRenderer.invoke('session:delete', options),
   forkSession: (options) => ipcRenderer.invoke('session:fork', options),
   rewindFiles: (options) => ipcRenderer.invoke('session:rewind', options),
   listMcp: () => ipcRenderer.invoke('mcp:list'),
+  addMcp: (payload) => ipcRenderer.invoke('mcp:add', payload),
+  removeMcp: (name) => ipcRenderer.invoke('mcp:remove', { name }),
+  listSkills: () => ipcRenderer.invoke('skills:list'),
+  addSkill: (payload) => ipcRenderer.invoke('skills:add', payload),
+  removeSkill: (name) => ipcRenderer.invoke('skills:remove', { name }),
+  getLastTurn: (sessionId) => ipcRenderer.invoke('usage:last-turn', { sessionId }),
   envStatus: () => ipcRenderer.invoke('env:status'),
   envAction: (actionId) => ipcRenderer.invoke('env:action', { actionId }),
   getGlobalRules: () => ipcRenderer.invoke('global-rules:get'),
   saveGlobalRules: (content) => ipcRenderer.invoke('global-rules:save', { content }),
+  listProviders: () => ipcRenderer.invoke('provider:list'),
+  saveProvider: (payload) => ipcRenderer.invoke('provider:save', payload),
+  removeProvider: (id) => ipcRenderer.invoke('provider:remove', { id }),
+  activateProvider: (id) => ipcRenderer.invoke('provider:activate', { id }),
+  pricingStatus: () => ipcRenderer.invoke('pricing:status'),
+  syncPricing: () => ipcRenderer.invoke('pricing:sync'),
+  usageStats: (options) =>
+    ipcRenderer.invoke(
+      'usage:stats',
+      typeof options === 'string' ? { range: options } : options
+    ),
   startSession: (options) => ipcRenderer.invoke('session:start', options),
   resumeSession: (options) => ipcRenderer.invoke('session:resume', options),
   send: (text, options = {}) => ipcRenderer.invoke('session:send', { text, ...options }),
@@ -70,8 +80,6 @@ contextBridge.exposeInMainWorld('desk', {
   onPickDirectory: subscribe('menu:pick-directory'),
   onMenuExport: subscribe('menu:export'),
   onMenuFind: subscribe('menu:find'),
-  onPtyData: subscribe('pty:data'),
-  onPtyExit: subscribe('pty:exit'),
   onQuickFocus: subscribe('quick:focus'),
   onQuickSend: subscribe('quick:send'),
 });

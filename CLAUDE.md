@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@anthropic-ai/claude-agent-sdk`。界面负责会话列表、对话流、权限弹窗、终端等，真正的执行仍由随包内置的 Claude Code CLI 完成。
+ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@anthropic-ai/claude-agent-sdk`。界面负责会话列表、对话流、权限弹窗等，真正的执行仍由随包内置的 Claude Code CLI 完成。
 
 - 复用本机 `~/.claude` 的登录、配置和 MCP；应用自身不管理账号、不保存 API Key。
 - 支持多会话并行：会话由渲染进程生成 key，后端每个 key 一个 CLI 进程，事件按 key 路由；侧边栏每个会话有独立状态灯。
-- 其他主要能力：图片附件（真实图片块）、文件附件（只记录绝对路径）、四种权限模式、计划审批、历史分页、上下文压缩提示、托盘与全局快速提问、内置终端。
+- 其他主要能力：图片附件（真实图片块）、文件附件（只记录绝对路径）、四种权限模式、计划审批、历史分页、上下文压缩提示、托盘与全局快速提问。
 - 主要面向 Windows x64（绿色 zip / 便携 exe）；macOS 可在 Mac 上打包。
 
 ## 常用命令
@@ -16,8 +16,8 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 ```bash
 npm install
 npm start                  # 开发运行；prestart 会先执行 build:renderer
-npm run build:renderer     # esbuild 构建 bundle.js / bundle.css / xterm.bundle.js / highlight.bundle.js
-npm test                   # node --test，共 20 项单元测试
+npm run build:renderer     # esbuild 构建 bundle.js / bundle.css / highlight.bundle.js
+npm test                   # node --test，共 89 项单元测试
 node --test tests/format.test.js                                     # 只跑一个测试文件
 node --test --test-name-pattern="关键词" tests/session-groups.test.js  # 只跑匹配的用例
 node tools/e2e-session.js  # 端到端冒烟：真实拉起 Claude（会消耗少量额度）
@@ -31,7 +31,7 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 打包时的仓库约束：
 
 - GitHub 不可达时，可复用本地 Electron 缓存：`npx electron-builder --win zip -c.electronDist=<缓存里的 electron-v45*-win32-x64.zip>`。
-- 不要改动 `npmRebuild: false`：`node-pty` 使用自带预编译二进制，触发 node-gyp 会让没装 Visual Studio 的机器打包失败。
+- 不要改动 `npmRebuild: false`：当前没有需要重编译的原生模块，保留它可以避免 electron-builder 触发 node-gyp。
 - 不要移除 `asarUnpack` 里的 `node_modules/@anthropic-ai/**/*`：SDK 的 `claude.exe` 在 asar 内无法执行。
 - 当前 `node_modules` 只装了 win32-x64 的 CLI 平台包；在 Mac 上需要重新 `npm install` 才会装 darwin 包。
 
@@ -42,11 +42,11 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 - `main.js`：窗口、托盘、快速提问窗口、菜单和全部 IPC。`sessions` Map 按 key 管理多个 `SessionManager`；所有推给渲染层的事件都带 key；空闲会话默认 30 分钟回收（`CLAUDE_DESK_IDLE_MS` 可调）。
 - `session.js`：`MessageQueue` + `SessionManager`。用流式输入 `query({ prompt: asyncIterable })` 保持一个 CLI 子进程多轮对话；`canUseTool` 按工具名分流：普通工具走 permission，`AskUserQuestion` 走 question，`ExitPlanMode` 走 plan；`interrupt`、`close`、`_settlePending` 负责收尾，避免权限 Promise 悬挂。
 - `preload.cjs`：`contextBridge` 暴露 `window.desk` 白名单接口和事件订阅，渲染层只能通过这些接口访问主进程。
-- `terminal.js`：node-pty + xterm 的终端会话；`store.js`：`app.getPath('userData')/settings.json` 的原子读写（临时文件 + rename）。
+- `store.js`：`app.getPath('userData')/settings.json` 的原子读写（临时文件 + rename）。
 
 ### 渲染层（`renderer/`，ESM 源码）
 
-- `app.js` 是唯一 UI 源码，由 esbuild 打包成 `bundle.js` / `bundle.css`；`xterm-entry.js`、`highlight-entry.js` 生成按需加载的懒加载包；`quick.html` + `quick.js` 是快速提问窗口；`session-groups.js`、`format.js` 是可直接测试的纯函数模块。
+- `app.js` 是唯一 UI 源码，由 esbuild 打包成 `bundle.js` / `bundle.css`；`highlight-entry.js` 生成按需加载的懒加载包；`quick.html` + `quick.js` 是快速提问窗口；`session-groups.js`、`format.js` 是可直接测试的纯函数模块。
 - 关键状态集中在 `app.js` 顶部的 `state`：`activeKey`、`keyToSession/sessionKeys`、`sessionStatus`、`commandsByKey/metaByKey/modeByKey`、`historyCache/historyView`、`pendingEvents`、`switchToken`。
 - 事件流：主进程 `session:event/state/permission/question/plan/error` → preload 订阅 → `handleSessionEvent`。非当前会话只更新状态灯和后台活动计时，不渲染；当前会话才进入 `handleEvent`。
 - 切换会话用 `switchToken` 丢弃过期结果；历史只保留最近 5 个会话的内存缓存，每次只渲染最近 50 条，顶部「加载更早」按需追加。
@@ -69,7 +69,7 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 
 ## 仓库特有的注意事项
 
-- `renderer/bundle.js`、`bundle.css`、`xterm.bundle.js`、`highlight.bundle.js` 是生成物且已 gitignore：不要手改，改源码后执行 `npm run build:renderer`。
+- `renderer/bundle.js`、`bundle.css`、`highlight.bundle.js` 是生成物且已 gitignore：不要手改，改源码后执行 `npm run build:renderer`。
 - 渲染进程处于沙箱（`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`）。需要新能力时在 `preload.cjs` 增加白名单接口，不要在渲染层直接引 Node。
 - 新增会话事件通道时，需同时更新 `preload.cjs` 的订阅、`main.js` 的发送端和 `app.js` 的处理器；事件必须带 key。
 - UI 文案保持中文；颜色和字号走 `styles.css` 的 CSS 变量，不要写死颜色。

@@ -5,6 +5,7 @@ const assert = require('node:assert');
 
 const {
   sanitizeBaseUrl,
+  providerEnvItem,
   isWindowsAppsPath,
   versionFrom,
   resolveEnvAction,
@@ -15,6 +16,30 @@ const {
   downloadUrl,
   findPython,
 } = require('../electron/env-status');
+
+test('自定义供应商的环境检测行只暴露名称、host 和是否有 Key', () => {
+  const system = providerEnvItem(null);
+  assert.equal(system.status, 'ok');
+  assert.ok(system.detail.includes('系统 / CC Switch'));
+
+  const item = providerEnvItem({
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/anthropic?token=SECRET',
+    hasKey: true,
+  });
+  assert.equal(item.status, 'ok');
+  assert.equal(item.version, 'DeepSeek');
+  assert.ok(item.detail.includes('api.deepseek.com'));
+  assert.ok(!JSON.stringify(item).includes('SECRET'));
+
+  const noKey = providerEnvItem({
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/anthropic',
+    hasKey: false,
+  });
+  assert.equal(noKey.status, 'warning');
+  assert.ok(noKey.detail.includes('未保存 Key'));
+});
 
 test('代理地址只保留 host 和端口，不泄露用户信息与查询参数', () => {
   const parsed = sanitizeBaseUrl('http://user:pass@127.0.0.1:15721/v1?x=SECRET');

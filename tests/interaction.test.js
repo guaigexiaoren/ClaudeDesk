@@ -112,3 +112,56 @@ test('普通工具仍然走权限回调', async () => {
   assert.equal(result.behavior, 'allow');
   assert.equal(result.updatedInput, undefined);
 });
+
+test('计划模式下普通工具自动允许，不再弹权限', async () => {
+  const session = new SessionManager();
+  session.permissionMode = 'plan';
+  let request = null;
+  session.on('permission', (payload) => {
+    request = payload;
+  });
+
+  const result = await session._askPermission('Bash', { command: 'echo 1' }, {});
+  assert.equal(result.behavior, 'allow');
+  assert.equal(request, null);
+});
+
+test('计划模式下提问和计划提交仍走各自事件', async () => {
+  const session = new SessionManager();
+  session.permissionMode = 'plan';
+
+  let question = null;
+  session.on('question', (payload) => {
+    question = payload;
+  });
+  const questionPending = session._askPermission(
+    'AskUserQuestion',
+    { questions: QUESTIONS },
+    {}
+  );
+  assert.ok(question);
+  session.respondQuestion(question.id, { response: '继续' });
+  assert.equal((await questionPending).behavior, 'allow');
+
+  let plan = null;
+  session.on('plan', (payload) => {
+    plan = payload;
+  });
+  const planPending = session._askPermission('ExitPlanMode', { plan: '草案' }, {});
+  assert.ok(plan);
+  session.respondPlan(plan.id, 'approve');
+  assert.equal((await planPending).behavior, 'allow');
+});
+
+test('切换权限模式失败时保留旧模式', async () => {
+  const session = new SessionManager();
+  session.permissionMode = 'plan';
+  session.query = {
+    setPermissionMode: async () => {
+      throw new Error('切换失败');
+    },
+  };
+
+  await assert.rejects(() => session.setPermissionMode('default'), /切换失败/);
+  assert.equal(session.permissionMode, 'plan');
+});

@@ -109,6 +109,34 @@ function versionFrom(text) {
   return match ? match[0] : null;
 }
 
+function providerEnvItem(activeProvider = null) {
+  if (!activeProvider) {
+    return {
+      id: 'provider',
+      label: 'ClaudeDesk 供应商',
+      level: 'required',
+      status: 'ok',
+      version: null,
+      detail: '系统 / CC Switch（跟随本机 ~/.claude）',
+      baseUrlHost: null,
+      actions: [],
+    };
+  }
+  const host = sanitizeBaseUrl(activeProvider.baseUrl)?.host || null;
+  return {
+    id: 'provider',
+    label: 'ClaudeDesk 供应商',
+    level: 'required',
+    status: activeProvider.hasKey ? 'ok' : 'warning',
+    version: activeProvider.name || null,
+    detail: activeProvider.hasKey
+      ? `ClaudeDesk 会话使用「${activeProvider.name || '自定义供应商'}」${host ? `（${host}）` : ''}，Key 已保存；不经过 CC Switch`
+      : `已选择「${activeProvider.name || '自定义供应商'}」，但未保存 Key；ClaudeDesk 会话会无法鉴权`,
+    baseUrlHost: host,
+    actions: [],
+  };
+}
+
 function summarizeStatus(items) {
   const requiredMissing = items.filter(
     (item) => item.level === 'required' && (item.status === 'missing' || item.status === 'error')
@@ -386,6 +414,7 @@ async function probeWinget(run) {
 async function collectEnvStatus(options = {}) {
   const startedAt = Date.now();
   const platform = options.platform || process.platform;
+  const activeProvider = options.activeProvider || null;
   const env = options.env || process.env;
   const home = options.home || env.USERPROFILE || env.HOME || '';
   const cwd = options.cwd || home;
@@ -470,6 +499,7 @@ async function collectEnvStatus(options = {}) {
       : { id: `download:${tool}`, label: '打开下载页', kind: 'download' };
 
   const components = [
+    providerEnvItem(activeProvider),
     {
       id: 'claude',
       label: '内置 Claude Code',
@@ -619,6 +649,19 @@ async function collectEnvStatus(options = {}) {
     actions: authActions,
   };
 
+  if (activeProvider) {
+    const providerName = activeProvider.name || '自定义供应商';
+    auth.level = 'optional';
+    auth.detail = `ClaudeDesk 当前使用「${providerName}」，本机登录 / CC Switch 仅供终端版使用。${
+      authDetail && authDetail !== '未检测到登录、API Key 或本机代理' ? ` ${authDetail}` : ''
+    }`;
+    const ccswitch = components.find((item) => item.id === 'ccswitch');
+    if (ccswitch) {
+      ccswitch.level = 'optional';
+      ccswitch.detail = `${ccswitch.detail}；ClaudeDesk 当前使用自定义供应商`;
+    }
+  }
+
   const all = [auth, ...components];
   const summary = summarizeStatus(all);
   const notes = [];
@@ -653,6 +696,7 @@ module.exports = {
   buildWingetScript,
   downloadUrl,
   sanitizeBaseUrl,
+  providerEnvItem,
   isWindowsAppsPath,
   versionFrom,
   summarizeStatus,

@@ -20,18 +20,38 @@
           <div class="section-title">
             <span>会话</span>
             <span class="section-actions">
+              <button
+                id="search-sessions"
+                class="icon-button"
+                title="搜索会话"
+                aria-label="搜索会话"
+              >
+                <svg
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="7" cy="7" r="4.5"></circle>
+                  <path d="M10.3 10.3 14 14"></path>
+                </svg>
+              </button>
               <button id="multi-toggle" class="icon-button" title="批量选择会话">多选</button>
               <button id="add-directory" class="icon-button" title="添加工作目录">＋目录</button>
               <button id="refresh-sessions" class="icon-button" title="刷新">⟳</button>
             </span>
           </div>
-          <input
-            id="session-search"
-            class="session-search"
-            type="search"
-            placeholder="搜索会话…"
-            spellcheck="false"
-          />
+          <div id="session-search-wrap" class="session-search-wrap" hidden>
+            <input
+              id="session-search"
+              class="session-search"
+              type="search"
+              placeholder="搜索会话…"
+              spellcheck="false"
+            />
+          </div>
           <div id="batch-bar" class="batch-bar" hidden>
             <span id="batch-count">已选 0 个</span>
             <button id="batch-trash">移入回收站</button>
@@ -52,7 +72,39 @@
         </div>
 
         <div class="sidebar-footer">
-          <button id="open-settings" class="ghost-button">⚙ 设置</button>
+          <div class="footer-actions">
+            <button id="open-usage" class="ghost-button" title="用量统计">
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <path d="M2.5 13.5h11"></path>
+                <path d="M4.5 13.5V9"></path>
+                <path d="M8 13.5V5"></path>
+                <path d="M11.5 13.5V2.5"></path>
+              </svg>
+              <span>用量</span>
+            </button>
+            <button id="open-settings" class="ghost-button" title="设置">
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="8" cy="8" r="2.2"></circle>
+                <path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"></path>
+              </svg>
+              <span>设置</span>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -61,7 +113,9 @@
           <div class="topbar-left">
             <span id="status-dot" class="dot idle"></span>
             <span id="session-title">新会话</span>
-            <span id="session-meta" class="meta"></span>
+            <span id="session-turn-time" class="session-turn" hidden></span>
+          </div>
+          <div class="topbar-right">
             <div class="control permission-control">
               <button id="permission-button" class="permission-button" title="权限模式">
                 <span id="permission-label">请求批准</span>
@@ -86,11 +140,6 @@
                 </button>
               </div>
             </div>
-          </div>
-          <div class="topbar-right">
-            <button id="toggle-terminal" class="ghost-button terminal-toggle" title="打开/关闭终端面板">
-              终端
-            </button>
           </div>
         </header>
 
@@ -117,17 +166,17 @@
           </div>
         </div>
 
-        <section id="terminal-panel" class="terminal-panel" hidden>
-          <div class="terminal-head">
-            <span class="terminal-title">终端</span>
-            <span id="terminal-cwd" class="terminal-cwd"></span>
-            <span class="terminal-actions">
-              <button id="terminal-restart" class="icon-button" title="重启终端">重启</button>
-              <button id="terminal-clear" class="icon-button" title="清空屏幕">清空</button>
-              <button id="terminal-close" class="icon-button" title="关闭终端">×</button>
-            </span>
+        <section id="plan-review" class="plan-review" hidden></section>
+
+        <section id="question-review" class="question-review" hidden>
+          <div class="question-card">
+            <h3>Claude 想确认一下</h3>
+            <div id="question-list" class="question-list"></div>
+            <div class="modal-actions">
+              <button id="question-skip" class="ghost-button">跳过</button>
+              <button id="question-submit" class="primary-button">提交</button>
+            </div>
           </div>
-          <div id="terminal-view" class="terminal-view"></div>
         </section>
 
         <div id="composer" class="composer">
@@ -168,84 +217,358 @@
       </div>
     </div>
 
-    <div id="question-modal" class="modal" hidden>
-      <div class="modal-card question-card">
-        <h3>Claude 想确认一下</h3>
-        <div id="question-list" class="question-list"></div>
-        <div class="modal-actions">
-          <button id="question-skip" class="ghost-button">跳过</button>
-          <button id="question-submit" class="primary-button">提交</button>
-        </div>
+    <div id="usage-modal" class="modal" hidden>
+      <div class="settings-shell usage-shell">
+        <section class="settings-content">
+          <div class="settings-panels">
+            <div id="usage-panel" class="usage-panel">
+              <div class="panel-head">
+                <div>
+                  <h4 title="只统计 ClaudeDesk 内完成的对话回合；自定义供应商按 DeepSeek 官方峰谷价 / models.dev 自动价计算，系统 / CC Switch 为 SDK 估算；未匹配到价格时显示 —">用量统计</h4>
+                </div>
+                <div id="usage-range" class="range-switch">
+                  <button class="range-button" data-range="today">今天</button>
+                  <button class="range-button active" data-range="7d">7 天</button>
+                  <button class="range-button" data-range="30d">30 天</button>
+                  <button class="range-button" data-range="all">全部</button>
+                  <button class="range-button" data-range="custom">自定义</button>
+                </div>
+              </div>
+              <div id="usage-custom-range" class="usage-custom-range" hidden>
+                <input id="usage-start" type="date" aria-label="开始日期" />
+                <span class="usage-custom-sep">至</span>
+                <input id="usage-end" type="date" aria-label="结束日期" />
+                <button id="usage-apply" type="button" class="ghost-button small-button">应用</button>
+                <span id="usage-custom-error" class="form-error" hidden></span>
+              </div>
+              <div id="usage-cards" class="usage-cards"></div>
+              <div class="usage-table-wrap">
+                <table class="usage-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>供应商</th>
+                      <th>模型</th>
+                      <th class="num" title="自定义供应商：DeepSeek 官方峰谷价 / models.dev 自动价；系统 / CC Switch：SDK 估算">成本</th>
+                      <th class="num" title="未命中缓存的新增输入 tokens">输入</th>
+                      <th class="num" title="模型生成的输出 tokens">输出</th>
+                      <th class="num" title="命中缓存读取的 tokens">缓存读</th>
+                      <th class="num" title="写入缓存的 tokens">缓存写</th>
+                      <th class="num" title="缓存读 /（输入 + 缓存读 + 缓存写）">命中率</th>
+                      <th class="num" title="输出 tokens / 生成阶段耗时（总耗时减首字耗时）">速度</th>
+                      <th class="num" title="首 token 延迟">首字</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usage-table-body"></tbody>
+                </table>
+                <div id="usage-empty" class="empty-hint" hidden>这个时间范围内还没有用量记录。</div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-footer">
+            <button id="usage-close" class="primary-button">关闭</button>
+          </div>
+        </section>
       </div>
     </div>
 
     <div id="settings-modal" class="modal" hidden>
-      <div class="modal-card settings-card">
-        <h3>设置</h3>
-        <div class="setting-row">
-          <span>主题色</span>
-          <div id="accent-swatches" class="accent-swatches"></div>
-        </div>
-        <label class="setting-row">
-          <span>字号</span>
-          <input id="font-size" type="range" min="12" max="20" step="1" />
-          <span id="font-size-value" class="setting-value">14</span>
-        </label>
-        <label class="setting-row">
-          <span>简洁对话</span>
-          <input id="concise-mode" type="checkbox" />
-          <span class="setting-value">折叠工具调用，只留结果</span>
-        </label>
-        <div class="setting-row mcp-row rules-row">
-          <span>全局规范</span>
-          <div class="mcp-panel">
-            <textarea
-              id="global-rules-text"
-              class="rules-text"
-              rows="10"
-              spellcheck="false"
-              placeholder="正在加载…"
-            ></textarea>
-            <div class="env-actions">
-              <button id="global-rules-save" class="ghost-button mcp-refresh">保存</button>
-              <button id="global-rules-reload" class="ghost-button mcp-refresh">重新加载</button>
-              <span id="global-rules-status" class="env-checked-at"></span>
+      <div class="settings-shell">
+        <aside class="settings-nav">
+          <h3>设置</h3>
+          <button class="settings-tab active" data-settings-tab="general">通用</button>
+          <button class="settings-tab" data-settings-tab="provider">供应商</button>
+          <button class="settings-tab" data-settings-tab="mcp">MCP</button>
+          <button class="settings-tab" data-settings-tab="skills">技能</button>
+          <button class="settings-tab" data-settings-tab="env">运行环境</button>
+          <button class="settings-tab" data-settings-tab="rules">全局规范</button>
+          <button class="settings-tab" data-settings-tab="about">关于</button>
+        </aside>
+        <section class="settings-content">
+          <div class="settings-panels">
+            <div class="settings-panel" data-settings-panel="general">
+              <div class="setting-row">
+                <span>主题色</span>
+                <div id="accent-swatches" class="accent-swatches"></div>
+              </div>
+              <label class="setting-row">
+                <span title="影响对话正文和左侧会话列表">字号</span>
+                <input id="font-size" type="range" min="12" max="20" step="1" title="影响对话正文和左侧会话列表" />
+                <span id="font-size-value" class="setting-value">14</span>
+              </label>
+              <label class="setting-row">
+                <span>简洁对话</span>
+                <input id="concise-mode" type="checkbox" />
+                <span class="setting-value">折叠工具调用，只留结果</span>
+              </label>
+              <div class="setting-row">
+                <span>工作目录</span>
+                <span id="settings-cwd" class="setting-value path"></span>
+              </div>
             </div>
-            <div class="env-note">
-              这是 Claude Code 的全局用户记忆文件 ~/.claude/CLAUDE.md，终端版也会读取。修改后对新建/恢复的会话生效；已在运行的会话需要重新打开。
+
+            <div class="settings-panel" data-settings-panel="provider" hidden>
+              <div class="panel-head">
+                <div>
+                  <h4>供应商</h4>
+                  <p class="panel-hint">
+                    直连供应商只影响 ClaudeDesk 启动的会话，终端版 Claude Code 不受影响。API Key 用系统安全存储加密后保存在本机。
+                  </p>
+                </div>
+                <button id="provider-add" class="primary-button small-button">＋ 新增供应商</button>
+              </div>
+
+              <div class="pricing-status-row">
+                <span id="pricing-status" class="panel-hint">模型价格：自动匹配中…</span>
+                <button id="pricing-sync" class="ghost-button small-button">同步价格</button>
+              </div>
+
+              <label class="setting-row provider-active-row">
+                <span>当前使用</span>
+                <select id="provider-active-select" class="form-select">
+                  <option value="">系统 / CC Switch（跟随本机 ~/.claude）</option>
+                </select>
+              </label>
+
+              <div id="provider-list" class="provider-list"></div>
+
+              <form id="provider-form" class="form-card" hidden>
+                <div class="form-head">
+                  <h5 id="provider-form-title">新增供应商</h5>
+                  <button type="button" id="provider-preset-deepseek" class="ghost-button small-button">
+                    填入 DeepSeek 预设
+                  </button>
+                </div>
+                <div class="form-grid">
+                  <label>
+                    <span>名称</span>
+                    <input id="provider-name" type="text" placeholder="DeepSeek" spellcheck="false" />
+                  </label>
+                  <label>
+                    <span>Base URL</span>
+                    <input
+                      id="provider-base-url"
+                      type="text"
+                      placeholder="https://api.deepseek.com/anthropic"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label>
+                    <span>鉴权方式</span>
+                    <select id="provider-auth-mode" class="form-select">
+                      <option value="authToken">Bearer Token（ANTHROPIC_AUTH_TOKEN）</option>
+                      <option value="apiKey">API Key（ANTHROPIC_API_KEY）</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>API Key</span>
+                    <input
+                      id="provider-key"
+                      type="password"
+                      autocomplete="off"
+                      placeholder="留空则保持已保存的 Key"
+                    />
+                  </label>
+                </div>
+                <label class="checkbox-row">
+                  <input id="provider-clear-key" type="checkbox" />
+                  <span>清除已保存的 Key</span>
+                </label>
+
+                <div class="form-section-title">模型映射（留空则复用已填写的模型；全部留空则用 CLI 默认模型）</div>
+                <div class="form-grid four">
+                  <label>
+                    <span>Opus</span>
+                    <input id="provider-model-opus" type="text" placeholder="deepseek-flash" spellcheck="false" />
+                  </label>
+                  <label>
+                    <span>Sonnet</span>
+                    <input id="provider-model-sonnet" type="text" placeholder="deepseek-flash" spellcheck="false" />
+                  </label>
+                  <label>
+                    <span>Haiku</span>
+                    <input id="provider-model-haiku" type="text" placeholder="deepseek-flash" spellcheck="false" />
+                  </label>
+                  <label>
+                    <span>Fable</span>
+                    <input id="provider-model-fable" type="text" placeholder="" spellcheck="false" />
+                  </label>
+                </div>
+
+                <div class="form-section-title">成本价格（自动）</div>
+                <p id="provider-pricing-hint" class="panel-hint">
+                  价格自动获取，不用手填。DeepSeek Flash 高峰：输入 $0.30 / 缓存命中 $0.006 / 输出 $1.20；Pro：$1.32 / $0.044 / $3.96（每百万 tokens）。空闲时段全部 5 折；高峰为周一至周五 09:00–12:00、14:00–18:00（北京时间），周末和法定节假日空闲。
+                </p>
+                <div class="form-grid">
+                  <label>
+                    <span>价格倍率（可选，默认 1）</span>
+                    <input id="provider-multiplier" type="number" min="0.1" max="10" step="0.01" value="1" />
+                  </label>
+                </div>
+
+                <div id="provider-form-error" class="form-error" hidden></div>
+                <div class="form-actions">
+                  <button type="button" id="provider-cancel" class="ghost-button">取消</button>
+                  <button type="submit" class="primary-button">保存</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="settings-panel" data-settings-panel="mcp" hidden>
+              <div class="panel-head">
+                <div>
+                  <h4>MCP 服务器</h4>
+                  <p class="panel-hint">
+                    写入用户级 ~/.claude.json，终端版 Claude Code 也会读取；环境变量会明文保存在该文件里。
+                  </p>
+                </div>
+                <button id="mcp-add-toggle" class="primary-button small-button">＋ 新增 MCP</button>
+              </div>
+
+              <form id="mcp-form" class="form-card" hidden>
+                <div class="form-grid">
+                  <label>
+                    <span>名称</span>
+                    <input id="mcp-name" type="text" placeholder="my-mcp" spellcheck="false" />
+                  </label>
+                  <label>
+                    <span>类型</span>
+                    <select id="mcp-type" class="form-select">
+                      <option value="stdio">stdio（本机命令）</option>
+                      <option value="http">http（远程）</option>
+                      <option value="sse">sse（远程）</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="mcp-stdio-fields">
+                  <div class="form-grid">
+                    <label>
+                      <span>启动命令</span>
+                      <input id="mcp-command" type="text" placeholder="npx" spellcheck="false" />
+                    </label>
+                  </div>
+                  <label class="form-block">
+                    <span>参数（每行一个）</span>
+                    <textarea id="mcp-args" rows="3" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-filesystem"></textarea>
+                  </label>
+                  <label class="form-block">
+                    <span>环境变量（每行 KEY=value，可选）</span>
+                    <textarea id="mcp-env" rows="2" spellcheck="false" placeholder="TOKEN=..."></textarea>
+                  </label>
+                </div>
+                <div id="mcp-remote-fields" hidden>
+                  <label class="form-block">
+                    <span>URL</span>
+                    <input id="mcp-url" type="text" placeholder="https://example.com/mcp" spellcheck="false" />
+                  </label>
+                  <label class="form-block">
+                    <span>请求头（每行 KEY=value，可选）</span>
+                    <textarea id="mcp-headers" rows="2" spellcheck="false" placeholder="Authorization=Bearer ..."></textarea>
+                  </label>
+                </div>
+                <div id="mcp-form-error" class="form-error" hidden></div>
+                <div class="form-actions">
+                  <button type="button" id="mcp-cancel" class="ghost-button">取消</button>
+                  <button type="submit" class="primary-button">添加</button>
+                </div>
+              </form>
+
+              <div class="setting-row mcp-row">
+                <span>已配置</span>
+                <div class="mcp-panel">
+                  <div id="mcp-list" class="mcp-list"></div>
+                  <button id="mcp-refresh" class="ghost-button mcp-refresh">刷新状态</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" data-settings-panel="skills" hidden>
+              <div class="panel-head">
+                <div>
+                  <h4>技能</h4>
+                  <p class="panel-hint" id="skills-root"></p>
+                </div>
+              </div>
+              <form id="skill-form" class="form-card">
+                <div class="form-grid">
+                  <label>
+                    <span>GitHub 仓库地址</span>
+                    <input
+                      id="skill-repo"
+                      type="text"
+                      placeholder="https://github.com/user/repo"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label>
+                    <span>技能子目录（可选）</span>
+                    <input id="skill-subpath" type="text" placeholder="skills/hello" spellcheck="false" />
+                  </label>
+                </div>
+                <div id="skill-form-error" class="form-error" hidden></div>
+                <div class="form-actions">
+                  <button type="submit" id="skill-install" class="primary-button">安装技能</button>
+                </div>
+              </form>
+              <div id="skills-list" class="skills-list"></div>
+              <p class="panel-hint">
+                技能来自第三方仓库，会作为指令被 Claude 读取。只安装可信来源；安装过程只复制文件，不执行仓库里的脚本。
+              </p>
+            </div>
+
+            <div class="settings-panel" data-settings-panel="env" hidden>
+              <div class="setting-row mcp-row env-row">
+                <span>运行环境</span>
+                <div class="mcp-panel">
+                  <div id="env-summary" class="env-summary">尚未检查</div>
+                  <div id="env-list" class="mcp-list env-list"></div>
+                  <div class="env-actions">
+                    <button id="env-refresh" class="ghost-button mcp-refresh">重新检查</button>
+                    <span id="env-checked-at" class="env-checked-at"></span>
+                  </div>
+                  <div id="env-note" class="env-note" hidden></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" data-settings-panel="rules" hidden>
+              <div class="setting-row mcp-row rules-row">
+                <span>全局规范</span>
+                <div class="mcp-panel">
+                  <textarea
+                    id="global-rules-text"
+                    class="rules-text"
+                    rows="10"
+                    spellcheck="false"
+                    placeholder="正在加载…"
+                  ></textarea>
+                  <div class="env-actions">
+                    <button id="global-rules-save" class="ghost-button mcp-refresh">保存</button>
+                    <button id="global-rules-reload" class="ghost-button mcp-refresh">重新加载</button>
+                    <span id="global-rules-status" class="env-checked-at"></span>
+                  </div>
+                  <div class="env-note">
+                    这是 Claude Code 的全局用户记忆文件 ~/.claude/CLAUDE.md，终端版也会读取。修改后对新建/恢复的会话生效；已在运行的会话需要重新打开。
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-panel" data-settings-panel="about" hidden>
+              <div class="setting-row">
+                <span>版本</span>
+                <span id="settings-version" class="setting-value"></span>
+              </div>
+              <div class="settings-placeholder">
+                <strong>ClaudeDesk</strong>
+                <p>基于 Claude Agent SDK 的桌面工作台。会话、登录和配置复用本机 ~/.claude。</p>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="setting-row mcp-row">
-          <span>MCP</span>
-          <div class="mcp-panel">
-            <div id="mcp-list" class="mcp-list"></div>
-            <button id="mcp-refresh" class="ghost-button mcp-refresh">刷新状态</button>
+          <div class="settings-footer">
+            <button id="settings-close" class="primary-button">关闭</button>
           </div>
-        </div>
-        <div class="setting-row mcp-row env-row">
-          <span>运行环境</span>
-          <div class="mcp-panel">
-            <div id="env-summary" class="env-summary">尚未检查</div>
-            <div id="env-list" class="mcp-list env-list"></div>
-            <div class="env-actions">
-              <button id="env-refresh" class="ghost-button mcp-refresh">重新检查</button>
-              <span id="env-checked-at" class="env-checked-at"></span>
-            </div>
-            <div id="env-note" class="env-note" hidden></div>
-          </div>
-        </div>
-        <div class="setting-row">
-          <span>工作目录</span>
-          <span id="settings-cwd" class="setting-value path"></span>
-        </div>
-        <div class="setting-row">
-          <span>版本</span>
-          <span id="settings-version" class="setting-value"></span>
-        </div>
-        <div class="modal-actions">
-          <button id="settings-close" class="primary-button">关闭</button>
-        </div>
+        </section>
       </div>
     </div>
 

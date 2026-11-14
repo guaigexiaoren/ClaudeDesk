@@ -1,10 +1,17 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import 'highlight.js/styles/github-dark.css';
-import '@xterm/xterm/css/xterm.css';
 import { buildSessionGroups } from './session-groups.js';
 import { formatDuration, formatStallLabel } from './format.js';
 import { createDraftStore } from './composer-drafts.js';
+import {
+  startTurn,
+  pauseTurn,
+  resumeTurn,
+  turnElapsed,
+  finishTurn,
+  lastTurnTiming,
+} from './turn-timing.js';
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -38,6 +45,46 @@ const ACCENTS = {
   pink: { color: '#ec6cb9', soft: 'rgba(236, 108, 185, 0.14)', border: 'rgba(236, 108, 185, 0.35)' },
   amber: { color: '#d29922', soft: 'rgba(210, 153, 34, 0.14)', border: 'rgba(210, 153, 34, 0.35)' },
 };
+
+const DIR_TONES = ['claude', 'blue', 'green', 'purple', 'pink', 'amber'];
+
+/** 目录路径越稳定，颜色越稳定；空目录（置顶组）交给 accent 色。 */
+function toneForDir(dir) {
+  const normalized = String(dir || '')
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  if (!normalized) return '';
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return DIR_TONES[(hash >>> 0) % DIR_TONES.length];
+}
+
+const GROUP_ICON_PATHS = {
+  folder:
+    'M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.6h4.8A1.5 1.5 0 0 1 14 6.1v5.4A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z',
+  star: 'M8 2.5l1.65 3.35 3.7.54-2.68 2.6.63 3.68L8 10.93l-3.3 1.74.63-3.68-2.68-2.6 3.7-.54L8 2.5Z',
+};
+
+function createGroupIcon(kind) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('class', 'group-folder');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.5');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', GROUP_ICON_PATHS[kind] || GROUP_ICON_PATHS.folder);
+  svg.appendChild(path);
+  return svg;
+}
+
 
 const COMMAND_ZH = {
   help: '查看帮助',
@@ -115,9 +162,10 @@ const state = {
   keyToSession: new Map(),
   sessionKeys: new Map(),
   sessionStatus: new Map(),
+  turnTimingByKey: new Map(),
+  pendingTurnStartedAt: 0,
   keyTitles: new Map(),
   commandsByKey: new Map(),
-  metaByKey: new Map(),
   mcpByKey: new Map(),
   modeByKey: new Map(),
   startingKeys: new Map(),
@@ -126,6 +174,7 @@ const state = {
   sessionsFetchedAt: 0,
   historyCache: new Map(),
   historyView: null,
+  preCompactView: null,
   renderTarget: null,
   compacting: false,
   lastStderrByKey: new Map(),
@@ -166,17 +215,16 @@ const state = {
   slashItems: [],
   slashIndex: 0,
   mcpStatus: {},
-  lastUserText: '',
   searchQuery: '',
+  settingsTab: 'general',
+  providers: { activeId: '', profiles: [] },
+  providersLoaded: false,
+  pricingStatus: null,
+  providerEditingId: null,
+  usageRange: '7d',
+  usageRequest: 0,
   selectMode: false,
   selectedSessions: new Set(),
-  terminalOpen: false,
-  terminalCwd: '',
-  terminal: null,
-  terminalFit: null,
-  terminalStarted: false,
-  terminalStarting: false,
-  terminalRestarting: false,
   findQuery: '',
   findMatches: [],
   findIndex: 0,
@@ -186,6 +234,7 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   messages: $('messages'),
+  planReview: $('plan-review'),
   activityBar: $('activity-bar'),
   activityLabel: $('activity-label'),
   activityTime: $('activity-time'),
@@ -197,7 +246,7 @@ const els = {
   errorBar: $('error-bar'),
   statusDot: $('status-dot'),
   sessionTitle: $('session-title'),
-  sessionMeta: $('session-meta'),
+  sessionTurnTime: $('session-turn-time'),
   sessionList: $('session-list'),
   addDirectory: $('add-directory'),
   trashToggle: $('trash-toggle'),
@@ -214,12 +263,14 @@ const els = {
   permAllow: $('perm-allow'),
   permAllowSession: $('perm-allow-session'),
   permDeny: $('perm-deny'),
-  questionModal: $('question-modal'),
+  questionReview: $('question-review'),
   questionList: $('question-list'),
   questionSubmit: $('question-submit'),
   questionSkip: $('question-skip'),
   slashPalette: $('slash-palette'),
   settingsModal: $('settings-modal'),
+  usageModal: $('usage-modal'),
+  usageClose: $('usage-close'),
   accentSwatches: $('accent-swatches'),
   fontSize: $('font-size'),
   fontSizeValue: $('font-size-value'),
@@ -237,7 +288,59 @@ const els = {
   envRefresh: $('env-refresh'),
   envCheckedAt: $('env-checked-at'),
   envNote: $('env-note'),
+  providerAdd: $('provider-add'),
+  providerActiveSelect: $('provider-active-select'),
+  providerList: $('provider-list'),
+  providerForm: $('provider-form'),
+  providerFormTitle: $('provider-form-title'),
+  providerPresetDeepseek: $('provider-preset-deepseek'),
+  providerName: $('provider-name'),
+  providerBaseUrl: $('provider-base-url'),
+  providerAuthMode: $('provider-auth-mode'),
+  providerKey: $('provider-key'),
+  providerClearKey: $('provider-clear-key'),
+  providerModelOpus: $('provider-model-opus'),
+  providerModelSonnet: $('provider-model-sonnet'),
+  providerModelHaiku: $('provider-model-haiku'),
+  providerModelFable: $('provider-model-fable'),
+  providerMultiplier: $('provider-multiplier'),
+  pricingStatus: $('pricing-status'),
+  pricingSync: $('pricing-sync'),
+  providerPricingHint: $('provider-pricing-hint'),
+  providerFormError: $('provider-form-error'),
+  providerCancel: $('provider-cancel'),
+  usageRange: $('usage-range'),
+  usageCustomRange: $('usage-custom-range'),
+  usageStart: $('usage-start'),
+  usageEnd: $('usage-end'),
+  usageApply: $('usage-apply'),
+  usageCustomError: $('usage-custom-error'),
+  usageCards: $('usage-cards'),
+  usageTableBody: $('usage-table-body'),
+  usageEmpty: $('usage-empty'),
+  mcpAddToggle: $('mcp-add-toggle'),
+  mcpForm: $('mcp-form'),
+  mcpName: $('mcp-name'),
+  mcpType: $('mcp-type'),
+  mcpCommand: $('mcp-command'),
+  mcpArgs: $('mcp-args'),
+  mcpUrl: $('mcp-url'),
+  mcpEnv: $('mcp-env'),
+  mcpHeaders: $('mcp-headers'),
+  mcpFormError: $('mcp-form-error'),
+  mcpCancel: $('mcp-cancel'),
+  mcpStdioFields: $('mcp-stdio-fields'),
+  mcpRemoteFields: $('mcp-remote-fields'),
+  skillsRootLabel: $('skills-root'),
+  skillsList: $('skills-list'),
+  skillForm: $('skill-form'),
+  skillRepo: $('skill-repo'),
+  skillSubpath: $('skill-subpath'),
+  skillFormError: $('skill-form-error'),
+  skillInstall: $('skill-install'),
   sessionSearch: $('session-search'),
+  sessionSearchWrap: $('session-search-wrap'),
+  searchSessions: $('search-sessions'),
   multiToggle: $('multi-toggle'),
   batchBar: $('batch-bar'),
   batchCount: $('batch-count'),
@@ -249,20 +352,13 @@ const els = {
   findPrev: $('find-prev'),
   findNext: $('find-next'),
   findClose: $('find-close'),
-  toggleTerminal: $('toggle-terminal'),
-  terminalPanel: $('terminal-panel'),
-  terminalCwd: $('terminal-cwd'),
-  terminalView: $('terminal-view'),
-  terminalRestart: $('terminal-restart'),
-  terminalClear: $('terminal-clear'),
-  terminalClose: $('terminal-close'),
 };
 
 /* ---------------- 工具函数 ---------------- */
 
 const scriptLoads = new Map();
 
-/** 按需加载拆分的本地脚本（终端、代码高亮），避免首屏解析大依赖。 */
+/** 按需加载拆分的本地脚本（代码高亮），避免首屏解析大依赖。 */
 function loadScriptOnce(src, globalName) {
   if (window[globalName]) return Promise.resolve(window[globalName]);
   if (scriptLoads.has(src)) return scriptLoads.get(src);
@@ -750,10 +846,6 @@ function appendThinking(text) {
   return details;
 }
 
-function closeThinkingGroup() {
-  state.thinkingGroup = null;
-}
-
 function ensureThinkingGroup() {
   if (state.thinkingGroup) return state.thinkingGroup;
   const details = document.createElement('details');
@@ -1045,6 +1137,7 @@ function attachToolResult(toolUseId, text, isError) {
       planCard.statusEl.className = `plan-inline-status ${isError ? 'rejected' : 'readonly'}`;
       planCard.actions.hidden = true;
       planCard.feedbackWrap.hidden = true;
+      restorePlanCard(planCard);
     }
     return;
   }
@@ -1075,7 +1168,7 @@ function attachToolResult(toolUseId, text, isError) {
 function appendStats(message) {
   closeToolGroup();
   const parts = [];
-  if (message.duration_ms) parts.push(`耗时 ${formatDuration(message.duration_ms)}`);
+  if (message.duration_ms) parts.push(`本轮 ${formatDuration(message.duration_ms)}`);
   if (typeof message.total_cost_usd === 'number') parts.push(`$${message.total_cost_usd.toFixed(4)}`);
   const usage = message.usage;
   if (usage && (usage.input_tokens || usage.output_tokens)) {
@@ -1318,9 +1411,9 @@ function handleResult(message) {
   if (interrupted) {
     if (!state.stopNoticeShown) appendNotice('已停止生成');
   } else if (message.is_error && message.result) {
-    showError(message.result);
+    showError(withContextLimitHint(message.result));
   } else if (message.subtype !== 'success' && Array.isArray(message.errors) && message.errors.length) {
-    showError(message.errors.join('\n'));
+    showError(withContextLimitHint(message.errors.join(' ')));
   }
   state.stopNoticeShown = false;
   appendStats(message);
@@ -1332,19 +1425,14 @@ function handleResult(message) {
     interrupted ? 'stopped' : 'done'
   );
 
-  // 新会话的第一轮结束后它才会出现在历史列表里，这里补一次刷新
-  if (state.sessionId && !state.sessions.some((item) => item.sessionId === state.sessionId)) {
-    refreshSessions(true);
-  }
+  // 新会话的 transcript 可能稍晚才被 listSessions 看到，延迟重试刷新
+  if (state.sessionId) scheduleSessionRefresh(state.sessionId);
 }
 
 function handleSystem(message) {
   if (message.subtype === 'init') {
     state.sessionId = message.session_id;
     state.sessionActive = true;
-    const meta = { model: message.model, version: message.claude_code_version };
-    if (state.activeKey) state.metaByKey.set(state.activeKey, meta);
-    els.sessionMeta.textContent = [meta.model, meta.version].filter(Boolean).join(' · ');
     if (!els.sessionTitle.dataset.custom) {
       els.sessionTitle.textContent = '当前会话';
     }
@@ -1364,10 +1452,8 @@ function handleSystem(message) {
     }
     if (state.activeKey) state.commandsByKey.set(state.activeKey, commands);
     if (state.commands.length === 0) state.commands = commands;
-    // 新会话第一次 init 时还没进入历史列表，立刻刷新一次并高亮当前会话
-    if (!state.sessions.some((session) => session.sessionId === message.session_id)) {
-      refreshSessions(true);
-    }
+    // 新会话第一次 init 时还没进入历史列表，自动重试刷新并高亮当前会话
+    scheduleSessionRefresh(message.session_id);
   } else if (message.subtype === 'permission_denied') {
     appendNotice(`已自动拒绝工具调用：${message.tool_name}`);
   } else if (message.subtype === 'status') {
@@ -1408,11 +1494,6 @@ function handleSessionEvent(key, message) {
   }
   if (message.type === 'system' && message.subtype === 'init') {
     registerSessionKey(key, message.session_id);
-    // 后台会话的 init 不会进入 handleSystem，这里也记录一份元信息
-    state.metaByKey.set(key, {
-      model: message.model,
-      version: message.claude_code_version,
-    });
     if (Array.isArray(message.mcp_servers)) {
       state.mcpByKey.set(
         key,
@@ -1421,6 +1502,7 @@ function handleSessionEvent(key, message) {
     }
   }
   updateSessionStatusFromEvent(key, message);
+  if (message.type === 'result') finishTurnTiming(key, message.duration_ms);
   if (key !== state.activeKey) {
     trackBackgroundActivity(key, message);
     return;
@@ -1503,6 +1585,15 @@ function handleSessionState(key, payload) {
   if (payload.cwd && payload.cwd !== state.cwd) setCwd(payload.cwd, false);
 }
 
+const CONTEXT_LIMIT_ERROR =
+  /maximum context length|context_length_exceeded|prompt is too long|too many tokens|context window.*(exceed|limit)|token limit/i;
+
+function withContextLimitHint(text) {
+  const raw = String(text || '会话出错');
+  if (!CONTEXT_LIMIT_ERROR.test(raw)) return raw;
+  return `${raw} — 当前会话已超过模型上下文上限：请发送 /compact 压缩上下文；若仍失败，请新建会话继续（旧会话会保留）。`;
+}
+
 function handleSessionError(key, text) {
   if (state.closedKeys.has(key)) return;
   state.startedKeys.delete(key);
@@ -1522,7 +1613,7 @@ function handleSessionError(key, text) {
   state.sessionActive = false;
   setRunning(false);
   finishActivity('任务出错', 'error');
-  showError(text || '会话出错');
+  showError(withContextLimitHint(text));
 }
 
 function handleEvent(message) {
@@ -1564,6 +1655,113 @@ function clearActivityState() {
   els.activityBar.classList.remove(...ACTIVITY_STATES);
 }
 
+function formatTotalTime(ms) {
+  const raw = Math.max(0, Number(ms) || 0);
+  if (raw > 0 && raw < 1000) return '不到 1 秒';
+  const totalSeconds = Math.round(raw / 1000);
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes > 0 ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
+}
+
+function beginTurnTiming(key, startedAt = performance.now()) {
+  if (!key) return;
+  state.turnTimingByKey.set(key, startTurn(startedAt));
+  if (key === state.activeKey) updateTurnTimeDisplay();
+}
+
+function pauseTurnTiming(key) {
+  const timing = key ? state.turnTimingByKey.get(key) : null;
+  if (timing && !timing.pausedAt) {
+    state.turnTimingByKey.set(key, pauseTurn(timing, performance.now()));
+  }
+  if (key === state.activeKey) updateTurnTimeDisplay();
+}
+
+function resumeTurnTiming(key) {
+  const timing = key ? state.turnTimingByKey.get(key) : null;
+  if (timing?.pausedAt) {
+    state.turnTimingByKey.set(key, resumeTurn(timing, performance.now()));
+  }
+  if (key === state.activeKey) updateTurnTimeDisplay();
+}
+
+function finishTurnTiming(key, durationMs) {
+  if (!key) return;
+  const timing = state.turnTimingByKey.get(key);
+  if (!timing && !(Number(durationMs) > 0)) return;
+  state.turnTimingByKey.set(
+    key,
+    finishTurn(timing || startTurn(performance.now()), durationMs, performance.now())
+  );
+  if (key === state.activeKey) updateTurnTimeDisplay();
+}
+
+function clearTurnTiming(key) {
+  if (!key) return;
+  state.turnTimingByKey.delete(key);
+  if (key === state.activeKey) updateTurnTimeDisplay();
+}
+
+/** 顶部只显示「本回合」用时，参考 Codex 的 Worked for；不跨回合累计。 */
+function updateTurnTimeDisplay() {
+  if (!els.sessionTurnTime) return;
+  const key = state.activeKey;
+  const timing = key ? state.turnTimingByKey.get(key) : null;
+  const running = Boolean(key && state.running);
+  let elapsed = 0;
+  if (running) {
+    elapsed = timing
+      ? turnElapsed(timing, performance.now())
+      : state.activityStartedAt
+        ? Math.max(0, performance.now() - state.activityStartedAt)
+        : 0;
+  } else if (timing?.lastDurationMs) {
+    elapsed = timing.lastDurationMs;
+  }
+
+  const visible = Boolean(key) && (elapsed > 0 || running);
+  els.sessionTurnTime.hidden = !visible;
+  if (!visible) {
+    els.sessionTurnTime.textContent = '';
+    els.sessionTurnTime.title = '';
+    els.sessionTurnTime.classList.remove('paused');
+    return;
+  }
+
+  const paused = running && Boolean(timing?.pausedAt);
+  els.sessionTurnTime.textContent = `⏱ 本轮 ${formatTotalTime(elapsed)}${
+    paused ? ' · 等待中' : ''
+  }`;
+  els.sessionTurnTime.classList.toggle('paused', paused);
+  els.sessionTurnTime.title = paused
+    ? '等待你确认权限/回答问题/审批计划，计时暂停'
+    : running
+      ? '从你发出这条消息开始计时，不跨回合累计'
+      : '本轮已完成，显示这一回合的总用时';
+}
+
+async function loadLastTurn(sessionId, key, token) {
+  if (!sessionId || state.turnTimingByKey.has(key)) return;
+  try {
+    const result = await window.desk.getLastTurn(sessionId);
+    const duration = Number(result?.turn?.durationMs) || 0;
+    if (!result?.ok || duration <= 0) return;
+    if (state.turnTimingByKey.has(key)) return;
+    if (key === state.activeKey && state.running) return;
+    state.turnTimingByKey.set(key, lastTurnTiming(duration));
+    if (key === state.activeKey && (token == null || token === state.switchToken)) {
+      updateTurnTimeDisplay();
+    }
+  } catch (error) {
+    console.warn('读取上一回合用时失败:', error);
+  }
+}
+
 function updateActivityTime() {
   if (!state.activityStartedAt) return;
   const elapsed = performance.now() - state.activityStartedAt;
@@ -1592,6 +1790,7 @@ function updateActivityTime() {
     }
   }
   els.activityLabel.textContent = label;
+  updateTurnTimeDisplay();
 }
 
 /** 显示当前正在做什么，并开始计时。 */
@@ -1632,6 +1831,7 @@ function finishActivity(label, kind = 'done') {
     els.activityBar.hidden = true;
     clearActivityState();
   }, ACTIVITY_HIDE_MS);
+  updateTurnTimeDisplay();
 }
 
 function clearActivity() {
@@ -1649,6 +1849,7 @@ function clearActivity() {
   clearActivityState();
   els.activityLabel.textContent = '';
   els.activityTime.textContent = '';
+  updateTurnTimeDisplay();
 }
 
 /** 把还没拿到结果的工具卡片标成已中断。 */
@@ -1667,6 +1868,7 @@ function markUnfinishedTools() {
 function handleUnexpectedEnd() {
   finalizeStream();
   clearInsertBadges();
+  finishTurnTiming(state.activeKey);
   finishActivity('本轮任务未完成', 'error');
   appendNotice('本轮任务未完成：会话已结束（没有收到完成结果）');
   markUnfinishedTools();
@@ -1686,7 +1888,7 @@ function registerSessionKey(key, sessionId) {
   state.keyToSession.set(key, sessionId);
   state.sessionKeys.set(sessionId, key);
   applySessionStatusToDom(sessionId);
-  if (!state.sessions.some((session) => session.sessionId === sessionId)) refreshSessions(true);
+  scheduleSessionRefresh(sessionId);
 }
 
 function sessionTitleFor(key) {
@@ -1731,11 +1933,9 @@ function updateSessionStatusFromEvent(key, message) {
       } else {
         setSessionStatus(key, key === state.activeKey ? null : 'done');
       }
-      // 新会话第一次跑完后才会出现在会话列表里，后台会话也要补一次刷新
+      // 新会话第一次跑完后才会出现在会话列表里，后台会话也要自动重试刷新
       const sessionId = state.keyToSession.get(key);
-      if (sessionId && !state.sessions.some((item) => item.sessionId === sessionId)) {
-        refreshSessions(true);
-      }
+      if (sessionId) scheduleSessionRefresh(sessionId);
       break;
     }
     default:
@@ -1792,6 +1992,7 @@ function setRunning(running) {
   els.input.placeholder = running
     ? 'Claude 正在工作，输入内容会插入当前任务…'
     : '给 Claude 发消息…';
+  updateTurnTimeDisplay();
 }
 
 function showError(text) {
@@ -1811,8 +2012,6 @@ function setCwd(dir, persist = true, refresh = persist) {
   const changed = (dir || '') !== state.cwd;
   state.cwd = dir || '';
   els.settingsCwd.textContent = dir || '未选择';
-  if (!state.terminalStarted) state.terminalCwd = state.cwd;
-  updateTerminalCwd();
   if (persist && changed) window.desk.saveSettings({ cwd: dir });
   if (refresh) refreshSessions(true);
 }
@@ -1842,13 +2041,6 @@ function renderPermissionMode(mode) {
   }
 }
 
-function setPermissionModeUI(mode) {
-  const info = permissionModeInfo(mode);
-  state.permissionMode = info.value;
-  renderPermissionMode(info.value);
-  return info.value;
-}
-
 async function changePermissionMode(mode) {
   if (
     mode === 'bypassPermissions' &&
@@ -1857,16 +2049,27 @@ async function changePermissionMode(mode) {
     return;
   }
   const key = state.activeKey;
-  const selected = setPermissionModeUI(mode);
-  if (key) state.modeByKey.set(key, selected);
+  const selected = permissionModeInfo(mode).value;
   els.permissionMenu.hidden = true;
-  await window.desk.saveSettings({ permissionMode: selected });
+
+  // 先让后端切换成功，再提交 UI；失败时界面和持久化都保持原样
   if (key && state.startedKeys.has(key)) {
-    const result = await window.desk.setPermissionMode({ key, mode: selected });
-    if (!result?.ok && state.activeKey === key) {
+    let result;
+    try {
+      result = await window.desk.setPermissionMode({ key, mode: selected });
+    } catch (error) {
+      result = { ok: false, error: error?.message || String(error) };
+    }
+    if (!result?.ok) {
       showError(result?.error || '切换权限模式失败');
+      return;
     }
   }
+  if (key) state.modeByKey.set(key, selected);
+  state.permissionMode = selected;
+  if (state.activeKey === key) renderPermissionMode(selected);
+  else renderPermissionMode(state.modeByKey.get(state.activeKey) || state.permissionMode);
+  await window.desk.saveSettings({ permissionMode: selected });
 }
 
 function applyAccent(key) {
@@ -1909,6 +2112,46 @@ function applyShortcutTip() {
       : 'Ctrl + Alt + Space 快速提问';
 }
 
+function toggleSessionSearch(show) {
+  const next = typeof show === 'boolean' ? show : els.sessionSearchWrap.hidden;
+  els.sessionSearchWrap.hidden = !next;
+  els.searchSessions.classList.toggle('active', next);
+  if (next) {
+    els.sessionSearch.focus();
+    els.sessionSearch.select();
+    return;
+  }
+  if (state.searchQuery) {
+    state.searchQuery = '';
+    els.sessionSearch.value = '';
+    renderSessionGroups();
+  }
+}
+
+function switchSettingsTab(tab) {
+  if (tab === 'usage') tab = 'general';
+  state.settingsTab = tab;
+  for (const button of document.querySelectorAll('.settings-tab')) {
+    button.classList.toggle('active', button.dataset.settingsTab === tab);
+  }
+  for (const panel of document.querySelectorAll('.settings-panel')) {
+    panel.hidden = panel.dataset.settingsPanel !== tab;
+  }
+  if (tab === 'provider') {
+    setFormError(els.providerFormError, '');
+    if (!state.providersLoaded) refreshProviders();
+    refreshPricingStatus();
+  }
+  if (tab === 'mcp') {
+    setFormError(els.mcpFormError, '');
+    refreshMcp();
+  }
+  if (tab === 'skills') {
+    setFormError(els.skillFormError, '');
+    refreshSkills();
+  }
+}
+
 function resetConversation() {
   saveDraft(state.activeKey);
   state.switchToken += 1;
@@ -1935,6 +2178,7 @@ function resetConversation() {
   state.toolCards.clear();
   state.toolGroup = null;
   state.thinkingGroup = null;
+  clearPlanDock();
   state.planCards.clear();
   state.sessionId = null;
   state.sessionActive = false;
@@ -1943,6 +2187,7 @@ function resetConversation() {
   state.replaying = false;
   state.pendingEvents = [];
   state.historyView = null;
+  state.preCompactView = null;
   state.renderTarget = null;
   state.compacting = false;
   state.commands = [];
@@ -1952,7 +2197,6 @@ function resetConversation() {
   clearActivity();
   hideSlashPalette();
   updateSessionTitle('');
-  els.sessionMeta.textContent = '';
   setRunning(false);
   clearError();
 }
@@ -1960,6 +2204,39 @@ function resetConversation() {
 /* ---------------- 会话操作 ---------------- */
 
 const SESSIONS_CACHE_MS = 1500;
+const SESSION_REFRESH_DELAYS = [300, 1000, 2500, 5000];
+const sessionRefreshTimers = new Map();
+
+/** 新会话的 transcript 可能稍晚才被 listSessions 看到，短间隔重试直到出现在左侧。 */
+function scheduleSessionRefresh(sessionId) {
+  if (!sessionId || state.sessions.some((session) => session.sessionId === sessionId)) return;
+  if (sessionRefreshTimers.has(sessionId)) return;
+
+  const attempt = (index) => {
+    if (state.sessions.some((session) => session.sessionId === sessionId)) {
+      const timer = sessionRefreshTimers.get(sessionId);
+      if (timer) clearTimeout(timer);
+      sessionRefreshTimers.delete(sessionId);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        await refreshSessions(true);
+      } catch {
+        /* 下一轮再试 */
+      }
+      if (state.sessions.some((session) => session.sessionId === sessionId)) {
+        sessionRefreshTimers.delete(sessionId);
+        return;
+      }
+      if (index + 1 < SESSION_REFRESH_DELAYS.length) attempt(index + 1);
+      else sessionRefreshTimers.delete(sessionId);
+    }, SESSION_REFRESH_DELAYS[index]);
+    sessionRefreshTimers.set(sessionId, timer);
+  };
+
+  attempt(0);
+}
 
 async function refreshSessions(force = false) {
   // 一次切换会触发多次刷新，合并成同一个请求，短时间内直接复用结果
@@ -1979,6 +2256,12 @@ async function refreshSessions(force = false) {
       ...session,
       title: titles[session.sessionId] || session.title,
     }));
+    for (const [sessionId, timer] of [...sessionRefreshTimers]) {
+      if (state.sessions.some((session) => session.sessionId === sessionId)) {
+        clearTimeout(timer);
+        sessionRefreshTimers.delete(sessionId);
+      }
+    }
     renderSessionGroups();
     renderTrash();
 
@@ -2017,12 +2300,23 @@ function renderSessionGroups() {
     const header = document.createElement('div');
     header.className = 'group-header';
     header.title = group.dir || '置顶的会话';
+    if (group.pinned) {
+      header.dataset.dirTone = 'pinned';
+    } else {
+      const tone = toneForDir(group.dir);
+      if (tone) header.dataset.dirTone = tone;
+    }
+
+    const label = document.createElement('span');
+    label.className = 'group-label';
+    label.append(createGroupIcon(group.pinned ? 'star' : 'folder'));
 
     const name = document.createElement('span');
     name.className = 'group-name';
     name.textContent = group.name;
 
-    header.append(name);
+    label.appendChild(name);
+    header.append(label);
 
     if (!group.pinned) {
       const add = document.createElement('button');
@@ -2453,7 +2747,704 @@ async function refreshMcp() {
     cmd.title = cmd.textContent;
 
     row.append(dot, name, scope, cmd);
+    if (server.scope === 'user') {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'ghost-button small-button danger mcp-remove';
+      remove.textContent = '删除';
+      remove.addEventListener('click', () => removeMcp(server.name));
+      row.appendChild(remove);
+    }
     els.mcpList.appendChild(row);
+  }
+}
+
+/* ---------------- 供应商与用量 ---------------- */
+
+function formatCost(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  const num = Number(value);
+  if (num === 0) return '$0';
+  if (num < 0.0001) return '<$0.0001';
+  return `$${num.toFixed(num < 0.01 ? 4 : 2)}`;
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  return `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+function formatSpeed(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  return `${Number(value).toFixed(1)} tok/s`;
+}
+
+function formatMs(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  const num = Number(value);
+  return num >= 1000 ? `${(num / 1000).toFixed(1)}s` : `${Math.round(num)}ms`;
+}
+
+function formatClock(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function setFormError(element, message) {
+  element.hidden = !message;
+  element.textContent = message || '';
+}
+
+function renderPricingStatus(status) {
+  if (!status || !els.pricingStatus) return;
+  state.pricingStatus = status;
+  const deepseek = status.deepseek || {};
+  const slotLabel = deepseek.label || (deepseek.slot === 'peak' ? '高峰（全价）' : '空闲（5 折）');
+  const synced = status.fetchedAt
+    ? `models.dev ${status.count} 个模型 · ${formatClock(status.fetchedAt)}`
+    : 'models.dev 未同步（使用内置 DeepSeek 价格）';
+  const error = status.lastError ? ` · 同步失败：${String(status.lastError).slice(0, 100)}` : '';
+  els.pricingStatus.textContent = `模型价格：自动 · ${synced} · DeepSeek 当前${slotLabel}${error}`;
+  if (els.providerPricingHint) {
+    els.providerPricingHint.textContent =
+      '价格自动获取，不用手填。DeepSeek Flash 高峰：输入 $0.30 / 缓存命中 $0.006 / 输出 $1.20；Pro：$1.32 / $0.044 / $3.96（每百万 tokens）。空闲时段全部 5 折；高峰为周一至周五 09:00–12:00、14:00–18:00（北京时间），周末和法定节假日空闲。' +
+      `当前：${slotLabel}。`;
+  }
+}
+
+async function refreshPricingStatus() {
+  try {
+    const result = await window.desk.pricingStatus();
+    if (result?.ok) renderPricingStatus(result.status);
+  } catch {
+    /* 价格状态失败不影响供应商操作 */
+  }
+}
+
+async function syncPricingNow() {
+  if (!els.pricingSync || els.pricingSync.disabled) return;
+  els.pricingSync.disabled = true;
+  els.pricingSync.textContent = '同步中…';
+  try {
+    const result = await window.desk.syncPricing();
+    if (result?.status) renderPricingStatus(result.status);
+    if (!result?.ok) {
+      els.pricingStatus.textContent = `价格同步失败：${result?.error || '未知错误'}（DeepSeek 内置价格仍可用）`;
+    }
+  } catch (error) {
+    els.pricingStatus.textContent = `价格同步失败：${error?.message || error}（DeepSeek 内置价格仍可用）`;
+  } finally {
+    els.pricingSync.disabled = false;
+    els.pricingSync.textContent = '同步价格';
+  }
+}
+
+function renderProviders() {
+  const { profiles, activeId } = state.providers;
+
+  const select = els.providerActiveSelect;
+  select.innerHTML = '';
+  const systemOption = document.createElement('option');
+  systemOption.value = '';
+  systemOption.textContent = '系统 / CC Switch（跟随本机 ~/.claude）';
+  select.appendChild(systemOption);
+  for (const profile of profiles) {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = profile.name;
+    select.appendChild(option);
+  }
+  select.value = activeId || '';
+
+  els.providerList.innerHTML = '';
+  if (profiles.length === 0) {
+    const hint = document.createElement('div');
+    hint.className = 'empty-hint';
+    hint.textContent = '还没有自定义供应商。默认跟随本机 Claude Code / CC Switch 的配置。';
+    els.providerList.appendChild(hint);
+    return;
+  }
+
+  for (const profile of profiles) {
+    const card = document.createElement('div');
+    card.className = `provider-card${profile.id === activeId ? ' active' : ''}`;
+
+    const head = document.createElement('div');
+    head.className = 'provider-card-head';
+    const name = document.createElement('span');
+    name.className = 'provider-name';
+    name.textContent = profile.name;
+    head.appendChild(name);
+
+    if (profile.id === activeId) {
+      const badge = document.createElement('span');
+      badge.className = 'provider-badge active';
+      badge.textContent = '使用中';
+      head.appendChild(badge);
+    }
+    if (!profile.hasKey) {
+      const badge = document.createElement('span');
+      badge.className = 'provider-badge warning';
+      badge.textContent = '未保存 Key';
+      head.appendChild(badge);
+    }
+
+    const actions = document.createElement('span');
+    actions.className = 'provider-card-actions';
+    if (profile.id !== activeId) {
+      const use = document.createElement('button');
+      use.type = 'button';
+      use.className = 'ghost-button small-button';
+      use.textContent = '使用';
+      use.addEventListener('click', () => activateProvider(profile.id));
+      actions.appendChild(use);
+    }
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'ghost-button small-button';
+    edit.textContent = '编辑';
+    edit.addEventListener('click', () => openProviderForm(profile));
+    actions.appendChild(edit);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'ghost-button small-button danger';
+    remove.textContent = '删除';
+    remove.addEventListener('click', () => deleteProvider(profile));
+    actions.appendChild(remove);
+    head.appendChild(actions);
+    card.appendChild(head);
+
+    const meta = document.createElement('div');
+    meta.className = 'provider-meta';
+    meta.textContent = `${profile.baseUrl} · ${
+      profile.authMode === 'apiKey' ? 'API Key' : 'Bearer Token'
+    }`;
+    card.appendChild(meta);
+
+    const models = Object.entries(profile.models || {})
+      .map(([key, value]) => `${key}: ${value}`)
+      .join(' · ');
+    if (models) {
+      const modelLine = document.createElement('div');
+      modelLine.className = 'provider-meta';
+      modelLine.textContent = `模型映射：${models}`;
+      card.appendChild(modelLine);
+    }
+
+    const priceLine = document.createElement('div');
+    priceLine.className = 'provider-meta';
+    priceLine.textContent = `成本价格：自动匹配（DeepSeek 官方峰谷 / models.dev）${
+      Number(profile.costMultiplier) !== 1 ? ` · 倍率 ${profile.costMultiplier}` : ''
+    }`;
+    card.appendChild(priceLine);
+
+    els.providerList.appendChild(card);
+  }
+}
+
+async function refreshProviders() {
+  try {
+    const result = await window.desk.listProviders();
+    if (!result?.ok) throw new Error(result?.error || '读取供应商失败');
+    state.providers = {
+      activeId: result.activeId || '',
+      profiles: Array.isArray(result.profiles) ? result.profiles : [],
+    };
+    state.providersLoaded = true;
+    renderProviders();
+  } catch (error) {
+    els.providerList.innerHTML = '';
+    const hint = document.createElement('div');
+    hint.className = 'empty-hint';
+    hint.textContent = `读取供应商失败：${error?.message || error}`;
+    els.providerList.appendChild(hint);
+  }
+}
+
+function openProviderForm(profile = null) {
+  state.providerEditingId = profile?.id || null;
+  els.providerForm.hidden = false;
+  els.providerFormTitle.textContent = profile ? '编辑供应商' : '新增供应商';
+  els.providerName.value = profile?.name || '';
+  els.providerBaseUrl.value = profile?.baseUrl || '';
+  els.providerAuthMode.value = profile?.authMode || 'authToken';
+  els.providerKey.value = '';
+  els.providerKey.placeholder = profile?.hasKey
+    ? '已保存 Key，留空保持不变'
+    : '填写 API Key';
+  els.providerClearKey.checked = false;
+  els.providerModelOpus.value = profile?.models?.opus || '';
+  els.providerModelSonnet.value = profile?.models?.sonnet || '';
+  els.providerModelHaiku.value = profile?.models?.haiku || '';
+  els.providerModelFable.value = profile?.models?.fable || '';
+  els.providerMultiplier.value = profile?.costMultiplier ?? 1;
+  renderPricingStatus(state.pricingStatus);
+  setFormError(els.providerFormError, '');
+  els.providerForm.scrollIntoView({ block: 'nearest' });
+}
+
+function closeProviderForm() {
+  els.providerForm.hidden = true;
+  state.providerEditingId = null;
+  setFormError(els.providerFormError, '');
+}
+
+function applyDeepSeekPreset() {
+  els.providerName.value = 'DeepSeek';
+  els.providerBaseUrl.value = 'https://api.deepseek.com/anthropic';
+  els.providerAuthMode.value = 'authToken';
+  els.providerModelOpus.value = 'deepseek-flash';
+  els.providerModelSonnet.value = 'deepseek-flash';
+  els.providerModelHaiku.value = 'deepseek-flash';
+  els.providerModelFable.value = '';
+  setFormError(els.providerFormError, '');
+}
+
+async function saveProviderForm(event) {
+  event.preventDefault();
+  const profile = {
+    id: state.providerEditingId || undefined,
+    name: els.providerName.value.trim(),
+    baseUrl: els.providerBaseUrl.value.trim(),
+    authMode: els.providerAuthMode.value,
+    models: {
+      opus: els.providerModelOpus.value.trim(),
+      sonnet: els.providerModelSonnet.value.trim(),
+      haiku: els.providerModelHaiku.value.trim(),
+      fable: els.providerModelFable.value.trim(),
+    },
+    costMultiplier: Number(els.providerMultiplier.value) || 1,
+  };
+  setFormError(els.providerFormError, '');
+  try {
+    const result = await window.desk.saveProvider({
+      profile,
+      key: els.providerKey.value,
+      clearKey: els.providerClearKey.checked,
+    });
+    if (!result?.ok) throw new Error(result?.error || '保存失败');
+    closeProviderForm();
+    await refreshProviders();
+    appendNotice(`供应商「${result.profile?.name || profile.name}」已保存。新启动的会话生效。`);
+  } catch (error) {
+    setFormError(els.providerFormError, error?.message || String(error));
+  }
+}
+
+async function activateProvider(id) {
+  try {
+    const result = await window.desk.activateProvider(id);
+    if (!result?.ok) throw new Error(result?.error || '切换失败');
+    state.providers = {
+      activeId: result.activeId || '',
+      profiles: Array.isArray(result.profiles) ? result.profiles : state.providers.profiles,
+    };
+    renderProviders();
+    appendNotice(
+      id
+        ? '已切换供应商。新启动或恢复的会话会使用它。'
+        : '已切回系统 / CC Switch 配置。新启动或恢复的会话生效。'
+    );
+  } catch (error) {
+    els.providerActiveSelect.value = state.providers.activeId || '';
+    showError(error?.message || String(error));
+  }
+}
+
+async function deleteProvider(profile) {
+  if (!window.confirm(`删除供应商「${profile.name}」？已保存的 API Key 也会删除。`)) return;
+  try {
+    const result = await window.desk.removeProvider(profile.id);
+    if (!result?.ok) throw new Error(result?.error || '删除失败');
+    state.providers = {
+      activeId: result.activeId || '',
+      profiles: Array.isArray(result.profiles) ? result.profiles : [],
+    };
+    renderProviders();
+  } catch (error) {
+    showError(error?.message || String(error));
+  }
+}
+
+function renderUsageCards(summary) {
+  els.usageCards.innerHTML = '';
+  const cards = [
+    {
+      label: '总成本',
+      title:
+        '自定义供应商按自动价格（DeepSeek 官方峰谷 / models.dev）；系统 / CC Switch 使用 SDK 估算；未匹配到价格时显示 —',
+      value: formatCost(summary.costUsd),
+      sub:
+        summary.requests > 0 && summary.costEntries < summary.requests
+          ? `${summary.costEntries}/${summary.requests} 条有价格`
+          : '',
+    },
+    {
+      label: '请求数',
+      title: 'ClaudeDesk 内完成的对话回合数',
+      value: String(summary.requests),
+      sub: '对话回合',
+    },
+    {
+      label: '真实 tokens',
+      title: '输入 + 输出 + 缓存读 + 缓存写，包含子代理',
+      value: formatTokenCount(summary.tokens),
+      sub: '输入+输出+缓存',
+    },
+    {
+      label: '缓存命中率',
+      title: '缓存读 /（输入 + 缓存读 + 缓存写）',
+      value: formatPercent(summary.cacheHitRate),
+      sub: '缓存读 / 提示 tokens',
+    },
+    {
+      label: '平均首字',
+      title: '首 token 延迟的平均值',
+      value: formatMs(summary.avgTtftMs),
+      sub: '首 token 延迟',
+    },
+    {
+      label: '生成速度',
+      title: '输出 tokens /（总耗时 - 首字耗时）',
+      value: formatSpeed(summary.speed),
+      sub: '输出 tokens / 秒',
+    },
+  ];
+  for (const card of cards) {
+    const node = document.createElement('div');
+    node.className = 'usage-card';
+    node.title = card.title;
+    const label = document.createElement('span');
+    label.className = 'usage-card-label';
+    label.textContent = card.label;
+    label.title = card.title;
+    const value = document.createElement('strong');
+    value.className = 'usage-card-value';
+    value.textContent = card.value;
+    value.title = card.title;
+    const sub = document.createElement('span');
+    sub.className = 'usage-card-sub';
+    sub.textContent = card.sub;
+    sub.title = card.title;
+    node.append(label, value, sub);
+    els.usageCards.appendChild(node);
+  }
+}
+
+function renderUsageEntries(entries) {
+  els.usageTableBody.innerHTML = '';
+  els.usageEmpty.hidden = entries.length > 0;
+  els.usageEmpty.textContent = '这个时间范围内还没有用量记录。';
+
+  for (const entry of entries) {
+    const tr = document.createElement('tr');
+    const cells = [
+      formatClock(entry.t),
+      entry.provider || '—',
+      entry.model || '—',
+      formatCost(entry.costUsd),
+      formatTokenCount(entry.input),
+      formatTokenCount(entry.output),
+      formatTokenCount(entry.cacheRead),
+      formatTokenCount(entry.cacheWrite),
+      formatPercent(
+        entry.input + entry.cacheRead + entry.cacheWrite > 0
+          ? entry.cacheRead / (entry.input + entry.cacheRead + entry.cacheWrite)
+          : null
+      ),
+      formatSpeed(
+        Number(entry.durationMs) > 0 && Number(entry.output) > 0
+          ? entry.output /
+              (Math.max(1, entry.durationMs - (Number(entry.ttftMs) || 0)) / 1000)
+          : null
+      ),
+      formatMs(entry.ttftMs),
+    ];
+    for (const [index, text] of cells.entries()) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      if (index >= 3) td.className = 'num';
+      td.title = text;
+      if (index === 3 && entry.priceSource) {
+        td.title =
+          entry.priceSource === 'deepseek-official'
+            ? `DeepSeek 官方价格 · ${entry.timeSlot === 'peak' ? '高峰全价' : '空闲 5 折'}`
+            : entry.priceSource === 'models-dev'
+              ? 'models.dev 自动价格'
+              : entry.priceSource === 'legacy-manual'
+                ? '旧版手动价格（兼容）'
+                : 'SDK 成本估算';
+      }
+      tr.appendChild(td);
+    }
+    if (entry.ok === false) tr.classList.add('usage-failed');
+    if (entry.partial) {
+      tr.title = '恢复会话后的第一回合：只统计主对话 tokens，子代理用量可能未计入';
+      const mark = document.createElement('span');
+      mark.className = 'usage-partial-mark';
+      mark.textContent = '*';
+      tr.firstChild.appendChild(mark);
+    }
+    els.usageTableBody.appendChild(tr);
+  }
+}
+
+function usageDateValue(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+    date.getDate()
+  ).padStart(2, '0')}`;
+}
+
+function ensureUsageCustomDates() {
+  if (els.usageStart.value && els.usageEnd.value) return;
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - 6);
+  if (!els.usageStart.value) els.usageStart.value = usageDateValue(start);
+  if (!els.usageEnd.value) els.usageEnd.value = usageDateValue(end);
+}
+
+function usageCustomBounds() {
+  const startValue = els.usageStart.value;
+  const endValue = els.usageEnd.value;
+  if (!startValue || !endValue) throw new Error('请选择开始和结束日期');
+  const startParts = startValue.split('-').map(Number);
+  const endParts = endValue.split('-').map(Number);
+  const start = new Date(startParts[0], startParts[1] - 1, startParts[2], 0, 0, 0, 0).getTime();
+  const end = new Date(endParts[0], endParts[1] - 1, endParts[2], 23, 59, 59, 999).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    throw new Error('结束日期不能早于开始日期');
+  }
+  return { start, end };
+}
+
+async function refreshUsage(range = state.usageRange) {
+  state.usageRange = range;
+  const custom = range === 'custom';
+  const requestId = ++state.usageRequest;
+  for (const button of els.usageRange.querySelectorAll('.range-button')) {
+    button.classList.toggle('active', button.dataset.range === range);
+  }
+  els.usageCustomRange.hidden = !custom;
+  setFormError(els.usageCustomError, '');
+
+  let payload = { range };
+  if (custom) {
+    ensureUsageCustomDates();
+    try {
+      const { start, end } = usageCustomBounds();
+      payload = { range: 'custom', start, end };
+    } catch (error) {
+      const message = error?.message || String(error);
+      setFormError(els.usageCustomError, message);
+      els.usageCards.innerHTML = '';
+      els.usageTableBody.innerHTML = '';
+      els.usageEmpty.hidden = false;
+      els.usageEmpty.textContent = `无法读取用量：${message}`;
+      return;
+    }
+  }
+
+  els.usageEmpty.hidden = true;
+  els.usageCards.innerHTML = '';
+  const loading = document.createElement('div');
+  loading.className = 'empty-hint';
+  loading.textContent = '正在读取用量…';
+  els.usageCards.appendChild(loading);
+
+  try {
+    const result = await window.desk.usageStats(payload);
+    if (requestId !== state.usageRequest) return;
+    if (!result?.ok) throw new Error(result?.error || '读取失败');
+    renderUsageCards(result.summary);
+    renderUsageEntries(Array.isArray(result.entries) ? result.entries : []);
+  } catch (error) {
+    if (requestId !== state.usageRequest) return;
+    els.usageCards.innerHTML = '';
+    els.usageTableBody.innerHTML = '';
+    els.usageEmpty.hidden = false;
+    els.usageEmpty.textContent = `读取用量失败：${error?.message || error}`;
+  }
+}
+
+function openUsageModal() {
+  els.usageModal.hidden = false;
+  refreshUsage(state.usageRange);
+}
+
+function closeUsageModal() {
+  els.usageModal.hidden = true;
+}
+
+/* ---------------- MCP 新增/删除 ---------------- */
+
+function toggleMcpForm(show) {
+  const next = typeof show === 'boolean' ? show : els.mcpForm.hidden;
+  els.mcpForm.hidden = !next;
+  if (next) {
+    setFormError(els.mcpFormError, '');
+    els.mcpName.focus();
+  }
+}
+
+function syncMcpTypeFields() {
+  const remote = els.mcpType.value !== 'stdio';
+  els.mcpStdioFields.hidden = remote;
+  els.mcpRemoteFields.hidden = !remote;
+}
+
+function parseEnvLines(text) {
+  const env = {};
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const index = trimmed.indexOf('=');
+    if (index <= 0) throw new Error(`环境变量格式不对：${trimmed.slice(0, 40)}`);
+    env[trimmed.slice(0, index).trim()] = trimmed.slice(index + 1);
+  }
+  return env;
+}
+
+async function addMcpFromForm(event) {
+  event.preventDefault();
+  setFormError(els.mcpFormError, '');
+  try {
+    const type = els.mcpType.value;
+    const payload = {
+      name: els.mcpName.value.trim(),
+      type,
+    };
+    if (type === 'stdio') {
+      payload.command = els.mcpCommand.value.trim();
+      payload.args = els.mcpArgs.value
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      payload.env = parseEnvLines(els.mcpEnv.value);
+    } else {
+      payload.url = els.mcpUrl.value.trim();
+      payload.headers = parseEnvLines(els.mcpHeaders.value);
+    }
+    const result = await window.desk.addMcp(payload);
+    if (!result?.ok) throw new Error(result?.error || '添加失败');
+    els.mcpForm.reset();
+    els.mcpType.value = 'stdio';
+    syncMcpTypeFields();
+    toggleMcpForm(false);
+    await refreshMcp();
+    appendNotice(`MCP「${result.name}」已添加。重启会话后生效。`);
+  } catch (error) {
+    setFormError(els.mcpFormError, error?.message || String(error));
+  }
+}
+
+async function removeMcp(name) {
+  if (!window.confirm(`删除 MCP「${name}」？会修改 ~/.claude.json。`)) return;
+  try {
+    const result = await window.desk.removeMcp(name);
+    if (!result?.ok) throw new Error(result?.error || '删除失败');
+    await refreshMcp();
+    appendNotice(`MCP「${name}」已删除。`);
+  } catch (error) {
+    showError(error?.message || String(error));
+  }
+}
+
+/* ---------------- 技能管理 ---------------- */
+
+async function refreshSkills() {
+  els.skillsList.innerHTML = '';
+  const loading = document.createElement('div');
+  loading.className = 'empty-hint';
+  loading.textContent = '正在读取技能…';
+  els.skillsList.appendChild(loading);
+  try {
+    const result = await window.desk.listSkills();
+    if (!result?.ok) throw new Error(result?.error || '读取技能失败');
+    els.skillsRootLabel.textContent = result.root ? `安装位置：${result.root}` : '';
+    els.skillsList.innerHTML = '';
+    if (!result.skills || result.skills.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = '还没有安装技能。填入 GitHub 仓库地址即可从仓库安装。';
+      els.skillsList.appendChild(hint);
+      return;
+    }
+    for (const skill of result.skills) {
+      const row = document.createElement('div');
+      row.className = 'skill-item';
+      const main = document.createElement('div');
+      main.className = 'skill-main';
+      const name = document.createElement('span');
+      name.className = 'skill-name';
+      name.textContent = skill.name;
+      const description = document.createElement('span');
+      description.className = 'skill-description';
+      description.textContent = skill.description || '（没有描述）';
+      const path = document.createElement('span');
+      path.className = 'skill-path';
+      path.textContent = skill.path;
+      path.title = skill.path;
+      main.append(name, description, path);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'ghost-button small-button danger';
+      remove.textContent = '删除';
+      remove.addEventListener('click', () => deleteSkill(skill));
+      row.append(main, remove);
+      els.skillsList.appendChild(row);
+    }
+  } catch (error) {
+    els.skillsList.innerHTML = '';
+    const hint = document.createElement('div');
+    hint.className = 'empty-hint';
+    hint.textContent = `读取技能失败：${error?.message || error}`;
+    els.skillsList.appendChild(hint);
+  }
+}
+
+async function installSkillFromForm(event) {
+  event.preventDefault();
+  setFormError(els.skillFormError, '');
+  const repoUrl = els.skillRepo.value.trim();
+  if (!repoUrl) {
+    setFormError(els.skillFormError, '请填写 GitHub 仓库地址');
+    return;
+  }
+  els.skillInstall.disabled = true;
+  els.skillInstall.textContent = '克隆并安装…';
+  try {
+    const result = await window.desk.addSkill({
+      repoUrl,
+      subpath: els.skillSubpath.value.trim(),
+    });
+    if (!result?.ok) throw new Error(result?.error || '安装失败');
+    els.skillForm.reset();
+    await refreshSkills();
+    appendNotice(`技能「${result.name}」已安装。重启会话后生效。`);
+  } catch (error) {
+    setFormError(els.skillFormError, error?.message || String(error));
+  } finally {
+    els.skillInstall.disabled = false;
+    els.skillInstall.textContent = '安装技能';
+  }
+}
+
+async function deleteSkill(skill) {
+  if (!window.confirm(`删除技能「${skill.name}」？这会删除 ${skill.path}。`)) return;
+  try {
+    const result = await window.desk.removeSkill(skill.name);
+    if (!result?.ok) throw new Error(result?.error || '删除失败');
+    await refreshSkills();
+  } catch (error) {
+    showError(error?.message || String(error));
   }
 }
 
@@ -2656,17 +3647,18 @@ async function closeSessionBackend(sessionId) {
   state.keyToSession.delete(key);
   state.keyTitles.delete(key);
   state.commandsByKey.delete(key);
-  state.metaByKey.delete(key);
   state.mcpByKey.delete(key);
   state.modeByKey.delete(key);
   state.lastStderrByKey.delete(key);
   state.activityByKey.delete(key);
+  state.turnTimingByKey.delete(key);
   dropHistory(sessionId);
   dropDraft(key);
   clearPrompts(key);
   if (state.activeKey === key) {
     state.activeKey = null;
     state.sessionActive = false;
+    state.preCompactView = null;
     setRunning(false);
   }
   await window.desk.closeSession({ key });
@@ -2786,6 +3778,143 @@ function updateHistoryLoader() {
   els.messages.prepend(loader);
 }
 
+function addPreCompactLoader(sessionId) {
+  if (!sessionId || state.preCompactView) return;
+  if (els.messages.querySelector('.precompact-loader')) return;
+  const summary = [...els.messages.querySelectorAll('.compact-summary')]
+    .filter((item) => !item.closest('.precompact-history'))
+    .pop();
+  if (!summary) return;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'precompact-loader';
+  button.textContent = '加载压缩前记录';
+  button.title = '从本地 transcript 读取压缩前的消息';
+  button.addEventListener('click', () => openPreCompactHistory(sessionId, button));
+  summary.insertAdjacentElement('afterend', button);
+}
+
+function renderPreCompactMessages(messages, sessionId, listEl, prepend) {
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  flushThinking();
+  closeToolGroup();
+  const fragment = document.createDocumentFragment();
+  state.renderTarget = fragment;
+  try {
+    renderHistoryRange(messages, sessionId, 0, messages.length);
+  } finally {
+    state.renderTarget = null;
+  }
+  closeToolGroup();
+  if (prepend) listEl.prepend(fragment);
+  else listEl.appendChild(fragment);
+}
+
+async function openPreCompactHistory(sessionId, button) {
+  if (state.running) {
+    showError('请先等本轮结束后再加载压缩前记录');
+    return;
+  }
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = '正在读取压缩前记录…';
+
+  let result;
+  try {
+    result = await window.desk.getPreCompactHistory({
+      sessionId,
+      offset: 0,
+      limit: 100,
+    });
+  } catch (error) {
+    button.textContent = `读取失败：${error?.message || error}`;
+    return;
+  }
+  if (sessionId !== state.sessionId) return;
+  if (!result?.ok || !result.available || !result.total) {
+    button.textContent = '没有找到压缩前记录';
+    button.disabled = true;
+    button.title = '该会话可能来自远程存储，或本地 transcript 不含压缩前消息';
+    return;
+  }
+
+  const head = document.createElement('summary');
+  head.textContent = `压缩前记录 · 共 ${result.total} 条`;
+  const note = document.createElement('div');
+  note.className = 'precompact-note';
+  note.textContent = '以下消息来自本地 transcript，位于上一次「上下文已压缩」之前。';
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'precompact-more';
+  more.textContent = result.hasMore ? '加载更早的压缩前记录' : '已加载全部压缩前记录';
+  more.hidden = !result.hasMore;
+  more.disabled = !result.hasMore;
+  const list = document.createElement('div');
+  list.className = 'precompact-list';
+
+  const details = document.createElement('details');
+  details.className = 'precompact-history';
+  details.open = true;
+  details.append(head, note, more, list);
+
+  const anchor = button.closest('.msg') || button.previousElementSibling;
+  if (anchor) anchor.before(details);
+  else els.messages.prepend(details);
+  button.remove();
+
+  state.preCompactView = {
+    sessionId,
+    offset: result.nextOffset,
+    total: result.total,
+    listEl: list,
+    moreEl: more,
+    headEl: head,
+  };
+  renderPreCompactMessages(result.messages, sessionId, list, false);
+  more.addEventListener('click', () => loadMorePreCompact());
+  requestAnimationFrame(() => details.scrollIntoView({ block: 'start' }));
+}
+
+async function loadMorePreCompact() {
+  const view = state.preCompactView;
+  if (!view || view.sessionId !== state.sessionId) return;
+  if (state.running) {
+    showError('请先等本轮结束后再加载压缩前记录');
+    return;
+  }
+  if (view.moreEl.disabled || view.moreEl.hidden) return;
+  view.moreEl.disabled = true;
+  view.moreEl.textContent = '正在读取…';
+
+  let result;
+  try {
+    result = await window.desk.getPreCompactHistory({
+      sessionId: view.sessionId,
+      offset: view.offset,
+      limit: 100,
+    });
+  } catch (error) {
+    view.moreEl.textContent = `读取失败：${error?.message || error}`;
+    view.moreEl.disabled = false;
+    return;
+  }
+  if (!view || view.sessionId !== state.sessionId) return;
+  if (!result?.ok || !result.available || !result.messages?.length) {
+    view.moreEl.textContent = '没有更多压缩前记录';
+    view.moreEl.disabled = true;
+    return;
+  }
+
+  renderPreCompactMessages(result.messages, view.sessionId, view.listEl, true);
+  view.offset = result.nextOffset;
+  view.total = result.total;
+  view.headEl.textContent = `压缩前记录 · 共 ${result.total} 条`;
+  view.moreEl.hidden = !result.hasMore;
+  view.moreEl.disabled = !result.hasMore;
+  view.moreEl.textContent = result.hasMore ? '加载更早的压缩前记录' : '已加载全部压缩前记录';
+}
+
 function loadEarlierHistory() {
   const view = state.historyView;
   if (!view || view.start <= 0) return;
@@ -2802,11 +3931,21 @@ function loadEarlierHistory() {
     state.renderTarget = null;
   }
 
-  els.messages.insertBefore(fragment, els.messages.firstChild);
+  const preCompact = els.messages.querySelector('.precompact-history');
+  const sdkSummary = [...els.messages.querySelectorAll('.compact-summary')].find(
+    (item) => !item.closest('.precompact-history')
+  );
+  const sdkSummaryWrap = sdkSummary?.closest('.msg');
+  const fragmentHasSummary = Boolean(fragment.querySelector('.compact-summary'));
+  if (fragmentHasSummary && sdkSummaryWrap) sdkSummaryWrap.before(fragment);
+  else if (sdkSummaryWrap) sdkSummaryWrap.after(fragment);
+  else if (preCompact) preCompact.after(fragment);
+  else els.messages.insertBefore(fragment, els.messages.firstChild);
   view.start = from;
   // 插入后补回高度差，视口停在原来的位置
   els.messages.scrollTop += els.messages.scrollHeight - previousHeight;
   updateHistoryLoader();
+  addPreCompactLoader(view.sessionId);
 }
 
 function showSessionLoading() {
@@ -2830,6 +3969,7 @@ function renderHistoryWindow(messages, sessionId, renderedUuids) {
   els.messages.appendChild(fragment);
   state.historyView = { sessionId, messages, start };
   updateHistoryLoader();
+  addPreCompactLoader(sessionId);
   // 先把视口放到最新消息，不用等后面的 SDK 恢复
   els.messages.scrollTop = els.messages.scrollHeight;
 }
@@ -2864,9 +4004,11 @@ async function resumeSession(session) {
   clearActivity();
   els.messages.innerHTML = '';
   state.historyView = null;
+  state.preCompactView = null;
   state.toolCards.clear();
   state.toolGroup = null;
   state.thinkingGroup = null;
+  clearPlanDock();
   state.planCards.clear();
   state.streamEl = null;
   state.commands = state.commandsByKey.get(key) || [];
@@ -2877,16 +4019,15 @@ async function resumeSession(session) {
     const activity = state.activityByKey.get(key);
     if (activity) setActivity(activity.label, activity.startedAt);
     else setActivity('正在工作…');
+    if (!state.turnTimingByKey.has(key)) {
+      beginTurnTiming(key, state.activityStartedAt || performance.now());
+    }
   }
   if (dir) setCwd(dir, true, false);
   updateSessionTitle(session.title);
   renderSessionGroups();
 
-  // 恢复这个会话自己的模型/MCP 信息和权限模式
-  const meta = state.metaByKey.get(key);
-  els.sessionMeta.textContent = meta
-    ? [meta.model, meta.version].filter(Boolean).join(' · ')
-    : '';
+  // 恢复这个会话自己的 MCP 信息和权限模式
   state.mcpStatus = state.mcpByKey.get(key) || {};
   renderPermissionMode(state.modeByKey.get(key) || state.permissionMode);
 
@@ -2919,6 +4060,7 @@ async function resumeSession(session) {
     renderHistoryWindow(messages, session.sessionId, renderedUuids);
     // 历史里最后一个工具调用没有结果，说明当时被中断了
     markUnfinishedTools();
+    loadLastTurn(session.sessionId, key, token);
   } catch (error) {
     historyFailed = true;
     if (token === state.switchToken) {
@@ -3023,7 +4165,7 @@ function clearPrompts(key) {
   }
   if (state.currentQuestion?.__key === key) {
     state.currentQuestion = null;
-    els.questionModal.hidden = true;
+    els.questionReview.hidden = true;
   }
   recalcAwaitingUser();
   pumpPermission();
@@ -3052,7 +4194,8 @@ function pumpPermission() {
   els.permModal.hidden = false;
   els.permDeny.focus();
   setSessionStatus(key, 'waiting');
-  state.awaitingUser = true;
+  recalcAwaitingUser();
+  pauseTurnTiming(key);
   if (key === state.activeKey) setActivity('等待你确认权限…');
   else rememberActivity(key, '等待你确认权限…');
 }
@@ -3062,12 +4205,16 @@ async function answerPermission(decision) {
   if (!entry) return;
   state.currentPermission = null;
   els.permModal.hidden = true;
-  const result = await window.desk.respondPermission({
-    key: entry.key,
-    id: entry.request.id,
-    decision,
-  });
-  state.awaitingUser = false;
+  let result;
+  try {
+    result = await window.desk.respondPermission({
+      key: entry.key,
+      id: entry.request.id,
+      decision,
+    });
+  } catch (error) {
+    result = { ok: false, error: error?.message || String(error) };
+  }
   if (!result?.ok) {
     setSessionStatus(entry.key, null);
     if (entry.key === state.activeKey) clearActivity();
@@ -3078,9 +4225,11 @@ async function answerPermission(decision) {
     if (entry.key === state.activeKey) setActivity('等待模型响应…');
   }
   pumpPermission();
+  if (!hasPendingPromptFor(entry.key)) resumeTurnTiming(entry.key);
+  recalcAwaitingUser();
 }
 
-/* ---------------- 提问弹窗 ---------------- */
+/* ---------------- 提问面板 ---------------- */
 
 function renderQuestionBlock(question, index) {
   const block = document.createElement('div');
@@ -3180,14 +4329,25 @@ function pumpQuestions() {
   (request.questions || []).forEach((question, index) => {
     els.questionList.appendChild(renderQuestionBlock(question, index));
   });
-  setModalHeading(els.questionModal, 'Claude 想确认一下', key);
-  els.questionModal.hidden = false;
-  const firstOption = els.questionList.querySelector(
-    'input[type="radio"], input[type="checkbox"]'
-  );
-  (firstOption || els.questionSkip).focus();
+  setModalHeading(els.questionReview, 'Claude 想确认一下', key);
+  els.questionReview.hidden = false;
+  const active = document.activeElement;
+  const canFocus =
+    key === state.activeKey &&
+    !els.input.value.trim() &&
+    (active === document.body || active === els.input) &&
+    els.settingsModal.hidden &&
+    els.usageModal.hidden &&
+    els.permModal.hidden;
+  if (canFocus) {
+    const firstOption = els.questionList.querySelector(
+      'input[type="radio"], input[type="checkbox"]'
+    );
+    (firstOption || els.questionSkip).focus();
+  }
   setSessionStatus(key, 'waiting');
-  state.awaitingUser = true;
+  recalcAwaitingUser();
+  pauseTurnTiming(key);
   if (key === state.activeKey) setActivity('等待你回答问题…');
   else rememberActivity(key, '等待你回答问题…');
 }
@@ -3224,17 +4384,21 @@ async function submitQuestion() {
   const key = request.__key;
   const answers = collectAnswers();
   state.currentQuestion = null;
-  els.questionModal.hidden = true;
+  els.questionReview.hidden = true;
 
-  const result =
-    Object.keys(answers).length > 0
-      ? await window.desk.respondQuestion({ key, id: request.id, answers })
-      : await window.desk.respondQuestion({
-          key,
-          id: request.id,
-          response: '用户没有做出选择，请自行判断后继续。',
-        });
-  state.awaitingUser = false;
+  let result;
+  try {
+    result =
+      Object.keys(answers).length > 0
+        ? await window.desk.respondQuestion({ key, id: request.id, answers })
+        : await window.desk.respondQuestion({
+            key,
+            id: request.id,
+            response: '用户没有做出选择，请自行判断后继续。',
+          });
+  } catch (error) {
+    result = { ok: false, error: error?.message || String(error) };
+  }
   if (!result?.ok) {
     setSessionStatus(key, null);
     if (key === state.activeKey) clearActivity();
@@ -3245,6 +4409,8 @@ async function submitQuestion() {
     if (key === state.activeKey) setActivity('等待模型响应…');
   }
   pumpQuestions();
+  if (!hasPendingPromptFor(key)) resumeTurnTiming(key);
+  recalcAwaitingUser();
 }
 
 async function skipQuestion() {
@@ -3252,13 +4418,17 @@ async function skipQuestion() {
   if (!request) return;
   const key = request.__key;
   state.currentQuestion = null;
-  els.questionModal.hidden = true;
-  const result = await window.desk.respondQuestion({
-    key,
-    id: request.id,
-    response: '用户跳过了这些问题，请自行判断后继续。',
-  });
-  state.awaitingUser = false;
+  els.questionReview.hidden = true;
+  let result;
+  try {
+    result = await window.desk.respondQuestion({
+      key,
+      id: request.id,
+      response: '用户跳过了这些问题，请自行判断后继续。',
+    });
+  } catch (error) {
+    result = { ok: false, error: error?.message || String(error) };
+  }
   if (!result?.ok) {
     setSessionStatus(key, null);
     if (key === state.activeKey) clearActivity();
@@ -3269,6 +4439,8 @@ async function skipQuestion() {
     if (key === state.activeKey) setActivity('等待模型响应…');
   }
   pumpQuestions();
+  if (!hasPendingPromptFor(key)) resumeTurnTiming(key);
+  recalcAwaitingUser();
 }
 
 /* ---------------- 计划审批 ---------------- */
@@ -3285,10 +4457,19 @@ function hasPendingPlan(key) {
   return false;
 }
 
-function recalcAwaitingUser() {
-  state.awaitingUser = Boolean(
-    state.currentPermission || state.currentQuestion || hasPendingPlan(state.activeKey)
+function hasPendingPromptFor(key) {
+  if (!key) return false;
+  return Boolean(
+    state.currentPermission?.key === key ||
+      state.currentQuestion?.__key === key ||
+      state.permissionQueue.some((entry) => entry.key === key) ||
+      state.questionQueue.some((request) => request.__key === key) ||
+      hasPendingPlan(key)
   );
+}
+
+function recalcAwaitingUser() {
+  state.awaitingUser = hasPendingPromptFor(state.activeKey);
 }
 
 function findPlanCardByText(key, plan) {
@@ -3299,6 +4480,37 @@ function findPlanCardByText(key, plan) {
     }
   }
   return null;
+}
+
+function hidePlanDockIfEmpty() {
+  if (els.planReview && els.planReview.childElementCount === 0) {
+    els.planReview.hidden = true;
+  }
+}
+
+function mountPlanCardToDock(record) {
+  if (!record?.wrap || !els.planReview) return;
+  if (record.wrap.parentElement !== els.planReview) {
+    removeWelcome();
+    els.planReview.appendChild(record.wrap);
+  }
+  els.planReview.hidden = false;
+}
+
+function restorePlanCard(record) {
+  if (!record?.wrap) return;
+  if (record.wrap.parentElement === els.planReview) {
+    const eligible = record.key === state.activeKey && !state.closedKeys.has(record.key);
+    if (eligible) appendEl(record.wrap);
+    else record.wrap.remove();
+  }
+  hidePlanDockIfEmpty();
+}
+
+function clearPlanDock() {
+  if (!els.planReview) return;
+  while (els.planReview.firstChild) els.planReview.removeChild(els.planReview.firstChild);
+  els.planReview.hidden = true;
 }
 
 function createPlanCard({
@@ -3364,12 +4576,14 @@ function createPlanCard({
   rejectBtn.type = 'button';
   rejectBtn.className = 'ghost-button';
   rejectBtn.dataset.planAction = 'reject';
-  rejectBtn.textContent = '拒绝并反馈';
+  rejectBtn.textContent = '继续修改计划';
+  rejectBtn.title = '告诉 Claude 想调整哪些步骤，保持计划模式';
   const approveBtn = document.createElement('button');
   approveBtn.type = 'button';
   approveBtn.className = 'primary-button';
   approveBtn.dataset.planAction = 'approve';
-  approveBtn.textContent = '批准并执行';
+  approveBtn.textContent = '批准并开始实现';
+  approveBtn.title = '批准整份计划，切换到默认权限并开始执行';
   actions.append(rejectBtn, approveBtn);
 
   card.append(head, body, feedbackWrap, actions);
@@ -3406,7 +4620,7 @@ function createPlanCard({
     if (record.status !== 'pending') return;
     if (feedbackWrap.hidden) {
       feedbackWrap.hidden = false;
-      rejectBtn.textContent = '拒绝并发送';
+      rejectBtn.textContent = '发送修改意见';
       feedback.focus();
       return;
     }
@@ -3422,7 +4636,7 @@ function createPlanCard({
       event.preventDefault();
       event.stopPropagation();
       feedbackWrap.hidden = true;
-      rejectBtn.textContent = '拒绝并反馈';
+      rejectBtn.textContent = '继续修改计划';
       return;
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -3445,12 +4659,21 @@ function createPlanCard({
     actions.hidden = true;
   }
 
-  appendEl(wrap);
+  if (wrap.parentElement !== els.planReview) appendEl(wrap);
   return record;
 }
 
 function attachPlanRequest(record, pendingRecord) {
   if (!pendingRecord || !record) return;
+  const previousKey = record.planKey;
+  if (pendingRecord.planKey && pendingRecord.planKey !== previousKey) {
+    if (state.planCards.get(previousKey) === record) state.planCards.delete(previousKey);
+    record.planKey = pendingRecord.planKey;
+    record.wrap.dataset.planKey = record.planKey;
+    record.card.dataset.planKey = record.planKey;
+    state.planCards.set(record.planKey, record);
+  }
+  if (!record.toolUseId && pendingRecord.toolUseId) record.toolUseId = pendingRecord.toolUseId;
   if (record.status === 'pending' && record.request?.id === pendingRecord.request?.id) return;
   record.request = pendingRecord.request;
   record.status = 'pending';
@@ -3462,9 +4685,12 @@ function attachPlanRequest(record, pendingRecord) {
   record.statusEl.className = 'plan-inline-status pending';
   record.actions.hidden = false;
   record.feedbackWrap.hidden = true;
-  record.rejectBtn.textContent = '拒绝并反馈';
+  record.rejectBtn.textContent = '继续修改计划';
   record.approveBtn.disabled = false;
   record.rejectBtn.disabled = false;
+  if (record.key === state.activeKey && !state.replaying && !state.renderTarget) {
+    mountPlanCardToDock(record);
+  }
 }
 
 function appendPlanToolCard(block) {
@@ -3526,6 +4752,7 @@ function handlePlan(key, request) {
   state.pendingPlans.set(planKey, pendingRecord);
 
   setSessionStatus(key, 'waiting');
+  pauseTurnTiming(key);
   if (key === state.activeKey) {
     setActivity('等待你审批计划…');
   } else {
@@ -3596,6 +4823,7 @@ function markPlanExpired(record) {
   record.statusEl.className = 'plan-inline-status expired';
   record.actions.hidden = true;
   record.feedbackWrap.hidden = true;
+  restorePlanCard(record);
 }
 
 function expirePlanCard(record) {
@@ -3622,12 +4850,22 @@ async function submitPlanDecision(record, decision) {
   state.pendingPlans.delete(planKey);
   recalcAwaitingUser();
 
-  const result = await window.desk.respondPlan({
-    key,
-    id: request.id,
-    decision,
-    feedback: decision === 'reject' ? feedback : undefined,
-  });
+  let result;
+  try {
+    result = await window.desk.respondPlan({
+      key,
+      id: request.id,
+      decision,
+      feedback: decision === 'reject' ? feedback : undefined,
+    });
+  } catch (error) {
+    result = { ok: false, error: error?.message || String(error) };
+  }
+
+  const settleTiming = () => {
+    if (!hasPendingPromptFor(key)) resumeTurnTiming(key);
+    recalcAwaitingUser();
+  };
 
   // 等待期间会话结束/被停止：按 IPC 结果落成“已批准/已失效”，不要变回“待批准”
   if (record.cancelled) {
@@ -3643,31 +4881,22 @@ async function submitPlanDecision(record, decision) {
     } else {
       markPlanExpired(record);
     }
+    restorePlanCard(record);
+    settleTiming();
     return;
   }
   if (record.status === 'expired') {
     if (!result?.ok) showError(result?.error || '提交计划审批失败');
+    restorePlanCard(record);
+    settleTiming();
     return;
   }
 
   if (!result?.ok) {
-    record.status = 'pending';
-    record.statusEl.textContent = '待批准';
-    record.statusEl.className = 'plan-inline-status pending';
-    record.approveBtn.disabled = false;
-    record.rejectBtn.disabled = false;
-    state.pendingPlans.set(planKey, {
-      planKey,
-      key,
-      request,
-      toolUseId: record.toolUseId,
-      plan: record.plan,
-      planFilePath: record.planFilePath,
-    });
-    setSessionStatus(key, 'waiting');
-    if (key === state.activeKey) setActivity('等待你审批计划…');
+    // respondPlan 失败只可能是会话已关闭或请求已结算，复活 pending 只会留下死卡
+    markPlanExpired(record);
     showError(result?.error || '提交计划审批失败');
-    recalcAwaitingUser();
+    settleTiming();
     return;
   }
 
@@ -3678,18 +4907,31 @@ async function submitPlanDecision(record, decision) {
   }`;
   record.actions.hidden = true;
   record.feedbackWrap.hidden = true;
+  restorePlanCard(record);
 
   if (decision === 'approve') {
-    state.modeByKey.set(key, 'default');
-    if (key === state.activeKey) renderPermissionMode('default');
+    let switched = true;
     if (state.startedKeys.has(key)) {
-      window.desk.setPermissionMode({ key, mode: 'default' });
+      let modeResult;
+      try {
+        modeResult = await window.desk.setPermissionMode({ key, mode: 'default' });
+      } catch (error) {
+        modeResult = { ok: false, error: error?.message || String(error) };
+      }
+      switched = Boolean(modeResult?.ok);
+      if (!switched) showError(modeResult?.error || '切换权限模式失败');
+    }
+    if (switched) {
+      state.modeByKey.set(key, 'default');
+      state.permissionMode = 'default';
+      if (key === state.activeKey) renderPermissionMode('default');
+      await window.desk.saveSettings({ permissionMode: 'default' });
     }
   }
   setSessionStatus(key, 'working');
   rememberActivity(key, '等待模型响应…');
   if (key === state.activeKey) setActivity('等待模型响应…');
-  recalcAwaitingUser();
+  settleTiming();
 }
 
 /* ---------------- 斜杠命令 ---------------- */
@@ -3872,174 +5114,6 @@ function closeFindBar() {
   els.input.focus();
 }
 
-/* ---------------- 终端 ---------------- */
-
-function terminalDir() {
-  return state.terminalCwd || state.cwd || '';
-}
-
-function updateTerminalCwd() {
-  const normalize = (value) =>
-    String(value || '')
-      .replace(/\//g, '\\')
-      .replace(/\\+$/, '')
-      .toLowerCase();
-  const mismatch =
-    state.terminalStarted &&
-    normalize(state.terminalCwd) &&
-    normalize(state.cwd) &&
-    normalize(state.terminalCwd) !== normalize(state.cwd);
-  els.terminalCwd.textContent = mismatch
-    ? `${state.terminalCwd}（与当前会话不同，点「重启」切换）`
-    : terminalDir() || '未选择目录';
-  els.terminalCwd.classList.toggle('mismatch', Boolean(mismatch));
-}
-
-function writeClipboard(text) {
-  if (!text) return;
-  window.desk.writeClipboard(text).catch(() => {});
-}
-
-function readClipboard() {
-  return window.desk
-    .readClipboard()
-    .then((result) => result?.text || '')
-    .catch(() => '');
-}
-
-let terminalCreating = null;
-
-function ensureTerminal() {
-  if (state.terminal) return Promise.resolve();
-  if (terminalCreating) return terminalCreating;
-
-  terminalCreating = (async () => {
-    try {
-      const xterm = await loadScriptOnce('xterm.bundle.js', '__ClaudeDeskXterm');
-      if (state.terminal) return;
-
-      const term = new xterm.Terminal({
-        cursorBlink: true,
-        fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace",
-        fontSize: 12.5,
-        lineHeight: 1.2,
-        scrollback: 5000,
-        theme: {
-          background: '#0d0f13',
-          foreground: '#d6d9de',
-          cursor: '#d97757',
-          selectionBackground: '#2f353f',
-        },
-      });
-      const fit = new xterm.FitAddon();
-      term.loadAddon(fit);
-      term.open(els.terminalView);
-
-      term.onData((data) => window.desk.ptyWrite(data));
-      term.onResize(({ cols, rows }) => window.desk.ptyResize({ cols, rows }));
-      term.attachCustomKeyEventHandler((event) => {
-        if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
-        if (event.code === 'KeyC') {
-          writeClipboard(term.getSelection());
-          return false;
-        }
-        if (event.code === 'KeyV') {
-          readClipboard().then((text) => {
-            if (text) window.desk.ptyWrite(text);
-          });
-          return false;
-        }
-        return true;
-      });
-
-      state.terminal = term;
-      state.terminalFit = fit;
-
-      const resize = () => {
-        if (els.terminalPanel.hidden) return;
-        try {
-          fit.fit();
-        } catch {
-          // 面板尺寸为 0 时 fit 会失败，忽略
-        }
-      };
-      new ResizeObserver(resize).observe(els.terminalView);
-      window.addEventListener('resize', resize);
-    } catch (err) {
-      console.error('终端组件加载失败:', err);
-    } finally {
-      terminalCreating = null;
-    }
-  })();
-
-  return terminalCreating;
-}
-
-async function startTerminal() {
-  if (state.terminalStarting || state.terminalStarted) return;
-  state.terminalStarting = true;
-  try {
-    await ensureTerminal();
-    if (!state.terminal) return;
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    try {
-      state.terminalFit?.fit();
-    } catch {
-      // 忽略尺寸计算失败
-    }
-
-    const result = await window.desk.ptyStart({
-      cwd: state.cwd,
-      cols: state.terminal.cols,
-      rows: state.terminal.rows,
-    });
-    if (!result?.ok) {
-      state.terminal.writeln(`\r\n[无法启动终端] ${result?.error || '未知错误'}\r\n`);
-      return;
-    }
-    state.terminalStarted = true;
-    state.terminalCwd = result.cwd || state.cwd;
-    updateTerminalCwd();
-    state.terminal.focus();
-  } finally {
-    state.terminalStarting = false;
-  }
-}
-
-async function restartTerminal() {
-  if (state.terminalStarting) return;
-  state.terminalRestarting = true;
-  await window.desk.ptyStop();
-  state.terminal?.reset();
-  state.terminalStarted = false;
-  state.terminalCwd = state.cwd;
-  updateTerminalCwd();
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  state.terminalRestarting = false;
-  await startTerminal();
-}
-
-async function toggleTerminal(force) {
-  const open = force ?? !state.terminalOpen;
-  state.terminalOpen = open;
-  els.terminalPanel.hidden = !open;
-  els.toggleTerminal.classList.toggle('active', open);
-  if (!open) return;
-
-  await ensureTerminal();
-  if (!state.terminal) return;
-  updateTerminalCwd();
-  requestAnimationFrame(() => {
-    try {
-      state.terminalFit?.fit();
-    } catch {
-      // 忽略
-    }
-    if (!state.terminalStarted) startTerminal();
-    else state.terminal?.focus();
-  });
-}
-
 /* ---------------- 发送 ---------------- */
 
 function autosize() {
@@ -4144,6 +5218,8 @@ async function sendMessage() {
 
   const viewToken = state.switchToken;
   const stopSeqAtSend = state.stopSeq;
+  const newTurn = !state.running;
+  if (newTurn) state.pendingTurnStartedAt = performance.now();
   state.sending = true;
   try {
     clearError();
@@ -4165,6 +5241,7 @@ async function sendMessage() {
 
     const ready = await ensureSession();
     if (!ready) {
+      state.pendingTurnStartedAt = 0;
       if (sendKey) setSessionStatus(sendKey, prevStatus || null);
       if (
         state.activityLabel === '正在启动会话…' ||
@@ -4177,19 +5254,28 @@ async function sendMessage() {
     }
     // 启动/恢复期间用户切走了会话：消息留在输入框，不要发到别的会话
     if (viewToken !== state.switchToken) {
+      state.pendingTurnStartedAt = 0;
       if (sendKey) setSessionStatus(sendKey, prevStatus || null);
       return;
     }
     // 启动/恢复期间用户点了停止：不要继续发送这条消息
     if (state.stopSeq !== stopSeqAtSend) {
+      state.pendingTurnStartedAt = 0;
       if (sendKey) setSessionStatus(sendKey, prevStatus || null);
       return;
     }
     const key = state.activeKey;
-    if (!key) return;
+    if (!key) {
+      state.pendingTurnStartedAt = 0;
+      return;
+    }
 
     const steer = state.running;
     const content = buildMessageContent(text, attachments);
+    if (!steer) {
+      beginTurnTiming(key, state.pendingTurnStartedAt || performance.now());
+    }
+    state.pendingTurnStartedAt = 0;
     setRunning(true);
     state.interruptRequested = false;
     state.stopNoticeShown = false;
@@ -4205,6 +5291,7 @@ async function sendMessage() {
         return;
       }
       // 发送失败时无论是否已切走，都要清掉这次发送留下的“工作中”状态
+      if (!steer) clearTurnTiming(key);
       const stillBusy = prevStatus === 'working' || prevStatus === 'waiting';
       setSessionStatus(key, prevStatus || null);
       if (key === state.activeKey) {
@@ -4248,6 +5335,7 @@ async function stopCurrent() {
   state.stopSeq += 1;
   state.interruptRequested = true;
   clearPrompts(key);
+  finishTurnTiming(key);
 
   // 立即给用户“已停止”的反馈，然后直接结束这个 CLI 进程；
   // 下一条消息会通过 resume 重新拉起会话。
@@ -4328,15 +5416,19 @@ async function init() {
     state.searchQuery = els.sessionSearch.value.trim();
     renderSessionGroups();
   });
+  els.searchSessions.addEventListener('click', () => toggleSessionSearch());
+  els.sessionSearch.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSessionSearch(false);
+    }
+  });
   els.multiToggle.addEventListener('click', () => toggleSelectMode());
   els.batchTrash.addEventListener('click', batchMoveToTrash);
   els.batchCancel.addEventListener('click', () => toggleSelectMode(false));
   updateBatchBar();
 
-  els.toggleTerminal.addEventListener('click', () => toggleTerminal());
-  els.terminalClose.addEventListener('click', () => toggleTerminal(false));
-  els.terminalClear.addEventListener('click', () => state.terminal?.clear());
-  els.terminalRestart.addEventListener('click', restartTerminal);
 
   els.findInput.addEventListener('input', () => runFind(true, false));
   els.findInput.addEventListener('keydown', (event) => {
@@ -4420,18 +5512,22 @@ async function init() {
       return;
     }
     if (event.key !== 'Escape') return;
-    if (els.terminalPanel.contains(event.target)) return;
     if (!els.permissionMenu.hidden) {
       els.permissionMenu.hidden = true;
       return;
     }
     if (!els.findBar.hidden) {
       closeFindBar();
+    } else if (!els.usageModal.hidden) {
+      closeUsageModal();
     } else if (!els.settingsModal.hidden) {
       if (canCloseSettings()) els.settingsModal.hidden = true;
     } else if (!els.slashPalette.hidden) {
       hideSlashPalette();
-    } else if (!els.questionModal.hidden) {
+    } else if (
+      !els.questionReview.hidden &&
+      els.questionReview.contains(document.activeElement)
+    ) {
       skipQuestion();
     } else if (!els.permModal.hidden) {
       answerPermission('deny');
@@ -4464,14 +5560,58 @@ async function init() {
     }
   });
 
+  for (const tab of document.querySelectorAll('.settings-tab')) {
+    tab.addEventListener('click', () => switchSettingsTab(tab.dataset.settingsTab));
+  }
+
+  $('open-usage').addEventListener('click', openUsageModal);
+  els.usageClose.addEventListener('click', closeUsageModal);
+  els.usageModal.addEventListener('click', (event) => {
+    if (event.target === els.usageModal) closeUsageModal();
+  });
   $('open-settings').addEventListener('click', () => {
     els.settingsModal.hidden = false;
+    switchSettingsTab(state.settingsTab || 'general');
+    refreshProviders();
+    refreshPricingStatus();
     refreshMcp();
     refreshEnvStatus();
     loadGlobalRules();
   });
   els.mcpRefresh.addEventListener('click', refreshMcp);
   els.envRefresh.addEventListener('click', refreshEnvStatus);
+  els.providerAdd.addEventListener('click', () => openProviderForm());
+  els.providerActiveSelect.addEventListener('change', () =>
+    activateProvider(els.providerActiveSelect.value)
+  );
+  els.providerCancel.addEventListener('click', closeProviderForm);
+  els.providerForm.addEventListener('submit', saveProviderForm);
+  els.providerPresetDeepseek.addEventListener('click', applyDeepSeekPreset);
+  els.pricingSync.addEventListener('click', syncPricingNow);
+  els.usageRange.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-range]');
+    if (button) refreshUsage(button.dataset.range);
+  });
+  els.usageApply.addEventListener('click', () => refreshUsage('custom'));
+  for (const input of [els.usageStart, els.usageEnd]) {
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        refreshUsage('custom');
+      }
+    });
+  }
+  els.mcpAddToggle.addEventListener('click', () => toggleMcpForm());
+  els.mcpType.addEventListener('change', syncMcpTypeFields);
+  els.mcpCancel.addEventListener('click', () => {
+    els.mcpForm.reset();
+    els.mcpType.value = 'stdio';
+    syncMcpTypeFields();
+    toggleMcpForm(false);
+  });
+  els.mcpForm.addEventListener('submit', addMcpFromForm);
+  els.skillForm.addEventListener('submit', installSkillFromForm);
+  syncMcpTypeFields();
   els.globalRulesSave.addEventListener('click', saveGlobalRules);
   els.globalRulesReload.addEventListener('click', reloadGlobalRules);
   els.globalRulesText.addEventListener('input', () => {
@@ -4518,13 +5658,6 @@ async function init() {
       handleCommands(commands);
       updateSlashPalette();
     }
-  });
-  window.desk.onPtyData(({ data }) => state.terminal?.write(data));
-  window.desk.onPtyExit((info) => {
-    state.terminalStarted = false;
-    if (state.terminalRestarting || els.terminalPanel.hidden) return;
-    const code = info?.exitCode === null || info?.exitCode === undefined ? '未知' : info.exitCode;
-    state.terminal?.writeln(`\r\n[终端已退出，退出码 ${code}]`);
   });
   window.desk.onQuickSend(({ text }) => {
     if (!text) return;
