@@ -5,6 +5,12 @@ import { buildSessionGroups } from './session-groups.js';
 import { formatDuration, formatStallLabel } from './format.js';
 import { createDraftStore } from './composer-drafts.js';
 import {
+  ticketTitle,
+  buildPermissionTicket,
+  buildQuestionTicket,
+  buildPlanTicket,
+} from './ticket-facts.js';
+import {
   startTurn,
   pauseTurn,
   resumeTurn,
@@ -228,6 +234,11 @@ const state = {
   findQuery: '',
   findMatches: [],
   findIndex: 0,
+  // 审批卡片：permission / question / plan 三类请求都从这里进入待审批队列
+  uiMode: 'ticket',
+  cwdByKey: new Map(),
+  ticketQueueByKey: new Map(),
+  ticketSubmitting: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -320,6 +331,8 @@ const els = {
   usageCards: $('usage-cards'),
   usageTableBody: $('usage-table-body'),
   usageEmpty: $('usage-empty'),
+  app: $('app'),
+  todayUsage: $('today-usage'),
   mcpAddToggle: $('mcp-add-toggle'),
   mcpForm: $('mcp-form'),
   mcpName: $('mcp-name'),
@@ -1198,6 +1211,15 @@ function formatTokenCount(value) {
   return num.toLocaleString('zh-CN');
 }
 
+function formatUsageTokens(value) {
+  const num = Number(value) || 0;
+  const short = (scaled, unit) => `${scaled.toFixed(1).replace(/\.0$/, '')}${unit} tokens`;
+  if (num >= 1e9) return short(num / 1e9, 'B');
+  if (num >= 1e6) return short(num / 1e6, 'M');
+  if (num >= 1e3) return short(num / 1e3, 'K');
+  return `${num} tokens`;
+}
+
 /** 压缩提示：实时事件带 token 数；历史记录里 SDK 丢掉了这些元信息，只能提示发生过压缩。 */
 function appendCompactNotice(meta) {
   closeToolGroup();
@@ -1419,6 +1441,7 @@ function handleResult(message) {
   }
   state.stopNoticeShown = false;
   appendStats(message);
+  scheduleTodayUsageRefresh();
   setRunning(false);
   finishActivity(
     interrupted ? '已停止生成' : message.duration_ms
@@ -1520,6 +1543,7 @@ function handleSessionEvent(key, message) {
 function handleSessionState(key, payload) {
   if (state.closedKeys.has(key)) return;
   if (payload.sessionId) registerSessionKey(key, payload.sessionId);
+  if (payload.cwd) state.cwdByKey.set(key, payload.cwd);
 
   if (key !== state.activeKey) {
     // 后台会话已经空闲时，不要把状态灯和“停止按钮”留在 working
@@ -1913,7 +1937,9 @@ function applySessionStatusToDom(sessionId) {
   for (const item of els.sessionList.querySelectorAll('.session-item')) {
     if (item.dataset.sessionId !== sessionId) continue;
     const dot = item.querySelector('.session-status');
-    if (dot) dot.className = `session-status${status ? ` ${status}` : ''}`;
+    if (dot) dot.className = `session-status session-light${status ? ` ${status}` : ''}`;
+    item.classList.remove('status-working', 'status-waiting', 'status-done', 'status-error');
+    if (status) item.classList.add(`status-${status}`);
   }
 }
 
@@ -2375,34 +2401,49 @@ function renderSessionGroups() {
   for (const group of groups) {
     const groupEl = document.createElement('div');
     groupEl.className = 'session-group';
+    const groupKey = group.pinned ? '__pinned__' : group.dir || group.name || '';
+    const collapsed = (state.settings.collapsedGroups || []).includes(groupKey);
+    if (collapsed) groupEl.classList.add('collapsed');
 
     const header = document.createElement('div');
     header.className = 'group-header';
+    if (!group.pinned) header.classList.add('has-add');
+    header.dataset.groupKey = groupKey;
     header.title = group.dir || '置顶的会话';
-    if (group.pinned) {
-      header.dataset.dirTone = 'pinned';
-    } else {
-      const tone = toneForDir(group.dir);
-      if (tone) header.dataset.dirTone = tone;
-    }
 
-    const label = document.createElement('span');
-    label.className = 'group-label';
-    label.append(createGroupIcon(group.pinned ? 'star' : 'folder'));
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'group-toggle';
+    toggle.title = collapsed ? '展开目录' : '收起目录';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.append(createGroupIcon(group.pinned ? 'star' : 'folder'));
 
     const name = document.createElement('span');
     name.className = 'group-name';
     name.textContent = group.name;
+    toggle.appendChild(name);
 
-    label.appendChild(name);
-    header.append(label);
+    const count = document.createElement('span');
+    count.className = 'group-count';
+    count.textContent = String(group.sessions.length);
+    toggle.appendChild(count);
+
+    toggle.addEventListener('click', (event) => {
+      toggleGroupCollapsed(groupKey, event.detail === 0);
+    });
+    header.appendChild(toggle);
 
     if (!group.pinned) {
       const add = document.createElement('button');
-      add.className = 'icon-button';
+      add.type = 'button';
+      add.className = 'group-add';
       add.textContent = '＋';
       add.title = '在此目录新建会话';
-      add.addEventListener('click', () => createSessionInDir(group.dir));
+      add.setAttribute('aria-label', '在此目录新建会话');
+      add.addEventListener('click', (event) => {
+        event.stopPropagation();
+        createSessionInDir(group.dir);
+      });
       header.appendChild(add);
 
       header.addEventListener('contextmenu', (event) => {
@@ -2413,19 +2454,35 @@ function renderSessionGroups() {
 
     groupEl.appendChild(header);
 
-    if (group.sessions.length === 0) {
-      const hint = document.createElement('div');
-      hint.className = 'empty-hint';
-      hint.textContent = '暂无会话';
-      groupEl.appendChild(hint);
-    }
+    if (!collapsed) {
+      if (group.sessions.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'empty-hint';
+        hint.textContent = '暂无会话';
+        groupEl.appendChild(hint);
+      }
 
-    for (const session of group.sessions) {
-      groupEl.appendChild(renderSessionItem(session));
+      for (const session of group.sessions) {
+        groupEl.appendChild(renderSessionItem(session));
+      }
     }
 
     els.sessionList.appendChild(groupEl);
   }
+}
+
+function toggleGroupCollapsed(groupKey, restoreFocus = false) {
+  const collapsed = new Set(state.settings.collapsedGroups || []);
+  if (collapsed.has(groupKey)) collapsed.delete(groupKey);
+  else collapsed.add(groupKey);
+  state.settings.collapsedGroups = [...collapsed];
+  window.desk.saveSettings({ collapsedGroups: state.settings.collapsedGroups });
+  renderSessionGroups();
+  if (!restoreFocus) return;
+  const header = [...els.sessionList.querySelectorAll('.group-header')].find(
+    (el) => el.dataset.groupKey === groupKey
+  );
+  header?.querySelector('.group-toggle')?.focus({ preventScroll: true });
 }
 
 function renderSessionItem(session) {
@@ -2445,6 +2502,15 @@ function renderSessionItem(session) {
     item.appendChild(checkbox);
   }
 
+  const sessionKey = state.sessionKeys.get(session.sessionId);
+  const sessionStatus = sessionKey ? state.sessionStatus.get(sessionKey) : null;
+  const ticketCount = sessionKey ? pendingTicketCount(sessionKey) : 0;
+
+  const light = document.createElement('span');
+  light.className = 'session-status session-light';
+  if (sessionStatus) light.classList.add(sessionStatus);
+  item.appendChild(light);
+
   const main = document.createElement('button');
   main.className = 'session-main';
 
@@ -2452,20 +2518,30 @@ function renderSessionItem(session) {
   title.className = 'title';
   title.textContent = session.title || '未命名会话';
 
-  const titleRow = document.createElement('span');
-  titleRow.className = 'session-title-row';
-  const statusDot = document.createElement('span');
-  statusDot.className = 'session-status';
-  const sessionKey = state.sessionKeys.get(session.sessionId);
-  const sessionStatus = sessionKey ? state.sessionStatus.get(sessionKey) : null;
-  if (sessionStatus) statusDot.classList.add(sessionStatus);
-  titleRow.append(title, statusDot);
+  const activity = sessionKey ? state.activityByKey.get(sessionKey) : null;
+  const meta = document.createElement('span');
+  meta.className = 'session-meta';
+  const metaText = document.createElement('span');
+  metaText.className = 'meta-text';
+  metaText.textContent =
+    activity?.label ||
+    (sessionStatus === 'waiting'
+      ? ticketCount > 0
+        ? `${ticketCount} 项待审批`
+        : '等待审批'
+      : sessionStatus === 'error'
+        ? '出错'
+        : sessionStatus === 'done'
+          ? '已完成'
+          : '空闲');
+  const metaTime = document.createElement('span');
+  metaTime.className = 'meta-time';
+  metaTime.textContent = relativeTime(session.lastModified);
+  meta.append(metaText, metaTime);
+  if (sessionStatus) item.classList.add(`status-${sessionStatus}`);
+  if (ticketCount > 0) item.classList.add('has-ticket');
 
-  const sub = document.createElement('span');
-  sub.className = 'sub';
-  sub.textContent = [relativeTime(session.lastModified), session.gitBranch].filter(Boolean).join(' · ');
-
-  main.append(titleRow, sub);
+  main.append(title, meta);
   main.addEventListener('click', () => {
     if (state.selectMode) {
       toggleSelected(session.sessionId);
@@ -2477,9 +2553,24 @@ function renderSessionItem(session) {
 
   item.appendChild(main);
 
+  const runTab = document.createElement('span');
+  runTab.className = 'run-tab';
+  runTab.textContent = '运行中';
+
+  const errorTab = document.createElement('span');
+  errorTab.className = 'err-tab';
+  errorTab.textContent = '出错';
+
+  const ticketTab = document.createElement('span');
+  ticketTab.className = 'ticket-tab';
+  ticketTab.textContent = String(ticketCount);
+  ticketTab.title = `${ticketCount} 项待审批`;
+  item.append(runTab, errorTab, ticketTab);
+
   if (state.selectMode) return item;
 
   const pinned = (state.settings.pinned || []).includes(session.sessionId);
+  if (pinned) item.classList.add('is-pinned');
 
   const pin = document.createElement('button');
   pin.className = `session-action${pinned ? ' pinned' : ''}`;
@@ -2517,7 +2608,10 @@ function renderSessionItem(session) {
     moveToTrash(session);
   });
 
-  item.append(pin, rename, exportButton, trash);
+  const actions = document.createElement('div');
+  actions.className = 'session-actions';
+  actions.append(rename, exportButton, trash, pin);
+  item.appendChild(actions);
   return item;
 }
 
@@ -2533,6 +2627,7 @@ function togglePin(session) {
 function startRename(session, item) {
   const titleEl = item.querySelector('.title');
   if (!titleEl) return;
+  item.classList.add('renaming');
 
   const input = document.createElement('input');
   input.className = 'rename-input';
@@ -3350,6 +3445,30 @@ async function refreshUsage(range = state.usageRange) {
     els.usageTableBody.innerHTML = '';
     els.usageEmpty.hidden = false;
     els.usageEmpty.textContent = `读取用量失败：${error?.message || error}`;
+  }
+}
+
+let todayUsageTimer = null;
+
+function scheduleTodayUsageRefresh() {
+  if (todayUsageTimer) clearTimeout(todayUsageTimer);
+  todayUsageTimer = setTimeout(() => {
+    todayUsageTimer = null;
+    refreshTodayUsage();
+  }, 300);
+}
+
+async function refreshTodayUsage() {
+  if (!els.todayUsage) return;
+  try {
+    const result = await window.desk.usageStats({ range: 'today' });
+    if (!result?.ok) return;
+    const summary = result.summary || {};
+    els.todayUsage.textContent = `${formatCost(summary.costUsd)} · ${formatUsageTokens(
+      summary.tokens
+    )}`;
+  } catch {
+    // 侧栏用量只是摘要，读取失败时保留旧值。
   }
 }
 
@@ -4246,12 +4365,25 @@ function clearPrompts(key) {
     state.currentQuestion = null;
     els.questionReview.hidden = true;
   }
+  if (state.uiMode === 'ticket') expireTicketsForKey(key);
   recalcAwaitingUser();
   pumpPermission();
   pumpQuestions();
 }
 
 function enqueuePermission(key, request) {
+  if (state.uiMode === 'ticket') {
+    openTicket(
+      key,
+      buildPermissionTicket({
+        key,
+        request,
+        cwd: state.cwdByKey.get(key) || (key === state.activeKey ? state.cwd : ''),
+        sessionTitle: sessionTitleFor(key),
+      })
+    );
+    return;
+  }
   state.permissionQueue.push({ key, request });
   pumpPermission();
 }
@@ -4306,6 +4438,522 @@ async function answerPermission(decision) {
   pumpPermission();
   if (!hasPendingPromptFor(entry.key)) resumeTurnTiming(entry.key);
   recalcAwaitingUser();
+}
+
+/* ---------------- 审批卡片 ---------------- */
+
+function ticketClock(createdAt) {
+  const seconds = Math.max(0, Math.floor((Date.now() - (createdAt || Date.now())) / 1000));
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function updateTicketClocks() {
+  const sheet = document.querySelector('.ticket-sheet');
+  if (!sheet) return;
+  const ticket = pendingTickets(state.activeKey)[0];
+  if (!ticket) return;
+  const clock = sheet.querySelector('.ticket-clock');
+  if (clock) clock.textContent = `待审批 · ${ticketClock(ticket.createdAt)}`;
+}
+
+function ticketKindLabel(ticket) {
+  if (ticket.kind === 'question') return '提问确认';
+  if (ticket.kind === 'plan') return '计划审批';
+  return '权限审批';
+}
+
+function ticketActivityLabel(ticket) {
+  if (ticket.kind === 'question') return '等待你回答问题…';
+  if (ticket.kind === 'plan') return '等待你审批计划…';
+  return '等待你确认权限…';
+}
+
+function pendingTickets(key) {
+  return (state.ticketQueueByKey.get(key) || []).filter((ticket) => ticket.status === 'pending');
+}
+
+function pendingTicketCount(key) {
+  return key ? pendingTickets(key).length : 0;
+}
+
+function openTicket(key, ticket) {
+  if (!key || !ticket) return;
+  const list = state.ticketQueueByKey.get(key) || [];
+  if (ticket.id && list.some((item) => item.id === ticket.id && item.kind === ticket.kind)) {
+    renderInlineApprovals(key);
+    return;
+  }
+  list.push(ticket);
+  state.ticketQueueByKey.set(key, list);
+  setSessionStatus(key, 'waiting');
+  pauseTurnTiming(key);
+  recalcAwaitingUser();
+  const label = ticketActivityLabel(ticket);
+  if (key === state.activeKey) setActivity(label);
+  else rememberActivity(key, label);
+  renderInlineApprovals(key);
+  renderSessionGroups();
+}
+
+function removeTicket(ticket) {
+  const list = state.ticketQueueByKey.get(ticket.key) || [];
+  state.ticketQueueByKey.set(
+    ticket.key,
+    list.filter((item) => item !== ticket)
+  );
+}
+
+function ticketResultLabel(ticket, action) {
+  if (ticket.kind === 'permission') return action === 'deny' ? '已拒绝' : '已允许';
+  if (ticket.kind === 'question') return action === 'skip' ? '已跳过' : '已回答';
+  return action === 'reject' ? '已拒绝' : '已批准';
+}
+
+function expireTicketsForKey(key) {
+  const list = state.ticketQueueByKey.get(key) || [];
+  const pending = list.filter((ticket) => ticket.status === 'pending');
+  if (pending.length === 0) return;
+  for (const ticket of pending) ticket.status = 'expired';
+  state.ticketQueueByKey.set(
+    key,
+    list.filter((ticket) => ticket.status !== 'expired')
+  );
+  renderInlineApprovals(key);
+  renderSessionGroups();
+}
+
+function renderInlineApprovals(key = state.activeKey) {
+  if (state.uiMode !== 'ticket' || !key || key !== state.activeKey || state.replaying) return;
+  for (const old of els.messages.querySelectorAll('.inline-approvals')) old.remove();
+  const tickets = pendingTickets(key);
+  if (tickets.length === 0) return;
+
+  removeWelcome();
+  const wrap = document.createElement('div');
+  wrap.className = 'inline-approvals';
+  const head = document.createElement('div');
+  head.className = 'inline-approvals-head';
+  head.textContent = `${tickets.length} 项待审批 · 可直接在对话里处理`;
+  wrap.appendChild(head);
+
+  for (const ticket of tickets) {
+    const sheet = buildTicketSheet(ticket);
+    sheet.classList.add('inline');
+    wrap.appendChild(sheet);
+  }
+
+  els.messages.appendChild(wrap);
+  scrollToBottom();
+}
+
+function ticketSection(index, title, meta) {
+  const section = document.createElement('section');
+  section.className = 'ticket-section';
+  const head = document.createElement('div');
+  head.className = 'ticket-section-head';
+  const number = document.createElement('span');
+  number.className = 'ticket-index';
+  number.textContent = index;
+  const heading = document.createElement('h4');
+  heading.textContent = title;
+  head.append(number, heading);
+  if (meta) {
+    const metaEl = document.createElement('span');
+    metaEl.className = 'ticket-section-meta';
+    metaEl.textContent = meta;
+    head.appendChild(metaEl);
+  }
+  section.appendChild(head);
+  return section;
+}
+
+function buildPermissionBody(ticket, body) {
+  const input = ticket.input || {};
+  const command = typeof input.command === 'string' ? input.command.trim() : '';
+  const filePath = input.file_path || input.notebook_path || input.path || '';
+  const subject = command || filePath || ticket.displayName || ticket.description || '工具调用';
+  const section1 = ticketSection('01', '将做什么', command ? '命令' : '对象');
+  const commandEl = document.createElement('div');
+  commandEl.className = 'ticket-command';
+  commandEl.textContent = subject;
+  section1.appendChild(commandEl);
+  if (ticket.description || ticket.decisionReason) {
+    const desc = document.createElement('p');
+    desc.className = 'ticket-desc';
+    desc.textContent = [ticket.description, ticket.decisionReason].filter(Boolean).join(' · ');
+    section1.appendChild(desc);
+  }
+  body.appendChild(section1);
+
+  const section2 = ticketSection('02', '在哪做', '范围');
+  const cwd = state.cwdByKey.get(ticket.key) || state.cwd || '未知工作目录';
+  const pathEl = document.createElement('div');
+  pathEl.className = 'ticket-path';
+  pathEl.textContent = cwd;
+  const scope = document.createElement('span');
+  scope.className = `ticket-scope${ticket.scope?.label === '项目外' ? ' outside' : ''}`;
+  scope.textContent = `${ticket.scope?.label || '需确认'} · ${ticket.scope?.detail || ''}`;
+  const scopeRow = document.createElement('div');
+  scopeRow.className = 'ticket-scope-row';
+  scopeRow.appendChild(scope);
+  section2.append(pathEl, scopeRow);
+  body.appendChild(section2);
+
+  const section3 = ticketSection('03', '之后会怎样', '影响');
+  const impact = document.createElement('p');
+  impact.className = 'ticket-desc';
+  impact.textContent = ticket.impact;
+  section3.appendChild(impact);
+  body.appendChild(section3);
+
+  const raw = document.createElement('details');
+  raw.className = 'ticket-raw';
+  const summary = document.createElement('summary');
+  summary.textContent = '04 原始请求';
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(ticket.input ?? {}, null, 2);
+  raw.append(summary, pre);
+  body.appendChild(raw);
+}
+
+function buildQuestionBody(ticket, body) {
+  (ticket.questions || []).forEach((question, index) => {
+    const block = document.createElement('div');
+    block.className = 'ticket-question';
+    block.dataset.index = String(index);
+
+    const label = document.createElement('div');
+    label.className = 'ticket-question-label';
+    label.textContent = question.header || `问题 ${index + 1}`;
+    const text = document.createElement('div');
+    text.className = 'ticket-question-text';
+    text.textContent = question.question || '';
+    block.append(label, text);
+
+    const type = question.multiSelect ? 'checkbox' : 'radio';
+    const name = `ticket-q-${ticket.id || ticket.createdAt}-${index}`;
+    for (const option of question.options || []) {
+      const optionLabel = document.createElement('label');
+      optionLabel.className = 'ticket-option';
+      const input = document.createElement('input');
+      input.type = type;
+      input.name = name;
+      input.value = option.label;
+      const copy = document.createElement('span');
+      copy.textContent = option.label;
+      if (option.description) {
+        const desc = document.createElement('span');
+        desc.className = 'ticket-option-desc';
+        desc.textContent = option.description;
+        copy.appendChild(desc);
+      }
+      optionLabel.append(input, copy);
+      block.appendChild(optionLabel);
+    }
+
+    const otherLabel = document.createElement('label');
+    otherLabel.className = 'ticket-option';
+    const otherInput = document.createElement('input');
+    otherInput.type = type;
+    otherInput.name = name;
+    otherInput.value = '__other__';
+    const otherText = document.createElement('input');
+    otherText.type = 'text';
+    otherText.className = 'ticket-other';
+    otherText.placeholder = '其他…';
+    otherText.addEventListener('focus', () => {
+      otherInput.checked = true;
+    });
+    otherLabel.append(otherInput, otherText);
+    block.appendChild(otherLabel);
+
+    body.appendChild(block);
+  });
+}
+
+function buildPlanBody(ticket, body) {
+  const section1 = ticketSection('01', '计划', '正文');
+  const plan = document.createElement('div');
+  plan.className = 'ticket-plan markdown';
+  plan.innerHTML = renderMarkdown(ticket.plan || '');
+  section1.appendChild(plan);
+  body.appendChild(section1);
+
+  const section2 = ticketSection('02', '计划文件', '路径');
+  const path = document.createElement('div');
+  path.className = 'ticket-path';
+  path.textContent = ticket.planFilePath || '未提供计划文件路径';
+  section2.appendChild(path);
+  body.appendChild(section2);
+
+  const section3 = ticketSection('03', '反馈', '拒绝时发送');
+  const feedback = document.createElement('textarea');
+  feedback.className = 'ticket-feedback';
+  feedback.placeholder = '如果拒绝，告诉 Claude 需要怎么改…';
+  section3.appendChild(feedback);
+  body.appendChild(section3);
+
+  const raw = document.createElement('details');
+  raw.className = 'ticket-raw';
+  const summary = document.createElement('summary');
+  summary.textContent = '04 原始请求';
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(
+    {
+      toolUseId: ticket.toolUseId,
+      planFilePath: ticket.planFilePath,
+      plan: ticket.plan,
+    },
+    null,
+    2
+  );
+  raw.append(summary, pre);
+  body.appendChild(raw);
+}
+
+function buildPermissionActions(ticket, sheet, actions) {
+  if (ticket.canAlwaysAllow) {
+    const label = document.createElement('label');
+    label.className = 'ticket-always';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.role = 'always';
+    const copy = document.createElement('span');
+    copy.textContent = '本次会话总是允许';
+    label.append(checkbox, copy);
+    actions.appendChild(label);
+  }
+
+  const buttons = document.createElement('div');
+  buttons.className = 'ticket-buttons';
+  const reject = document.createElement('button');
+  reject.type = 'button';
+  reject.className = 'ticket-reject';
+  reject.textContent = '拒绝';
+  reject.addEventListener('click', () => submitTicket(ticket, 'deny', sheet));
+
+  const sign = document.createElement('button');
+  sign.type = 'button';
+  sign.className = 'ticket-sign';
+  sign.append('批准并执行');
+  const kbd = document.createElement('kbd');
+  kbd.textContent = 'Enter';
+  sign.appendChild(kbd);
+  sign.addEventListener('click', () => {
+    const always = actions.querySelector('[data-role="always"]');
+    submitTicket(ticket, always?.checked ? 'allow-session' : 'allow', sheet);
+  });
+
+  buttons.append(reject, sign);
+  actions.appendChild(buttons);
+}
+
+function buildQuestionActions(ticket, sheet, actions) {
+  const buttons = document.createElement('div');
+  buttons.className = 'ticket-buttons';
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.className = 'ticket-reject';
+  skip.textContent = '跳过';
+  skip.addEventListener('click', () => submitTicket(ticket, 'skip', sheet));
+
+  const submit = document.createElement('button');
+  submit.type = 'button';
+  submit.className = 'ticket-sign';
+  submit.append('提交答复');
+  const kbd = document.createElement('kbd');
+  kbd.textContent = 'Enter';
+  submit.appendChild(kbd);
+  submit.addEventListener('click', () => submitTicket(ticket, 'submit', sheet));
+
+  buttons.append(skip, submit);
+  actions.appendChild(buttons);
+}
+
+function buildPlanActions(ticket, sheet, actions) {
+  const buttons = document.createElement('div');
+  buttons.className = 'ticket-buttons';
+  const reject = document.createElement('button');
+  reject.type = 'button';
+  reject.className = 'ticket-reject';
+  reject.textContent = '拒绝并反馈';
+  reject.addEventListener('click', () => submitTicket(ticket, 'reject', sheet));
+
+  const approve = document.createElement('button');
+  approve.type = 'button';
+  approve.className = 'ticket-sign';
+  approve.append('批准计划');
+  const kbd = document.createElement('kbd');
+  kbd.textContent = 'Enter';
+  approve.appendChild(kbd);
+  approve.addEventListener('click', () => submitTicket(ticket, 'approve', sheet));
+
+  buttons.append(reject, approve);
+  actions.appendChild(buttons);
+}
+
+function buildTicketSheet(ticket) {
+  const sheet = document.createElement('article');
+  sheet.className = 'ticket-sheet';
+  sheet.dataset.kind = ticket.kind;
+  sheet.tabIndex = -1;
+
+  const head = document.createElement('header');
+  head.className = 'ticket-sheet-head';
+  const kicker = document.createElement('div');
+  kicker.className = 'ticket-kicker';
+  const kind = document.createElement('span');
+  kind.className = 'ticket-kind';
+  kind.textContent = ticketKindLabel(ticket);
+  const clock = document.createElement('span');
+  clock.className = 'ticket-clock';
+  clock.textContent = `待审批 · ${ticketClock(ticket.createdAt)}`;
+  kicker.append(kind, clock);
+  const title = document.createElement('div');
+  title.className = 'ticket-title';
+  title.textContent = ticketTitle(ticket);
+  const sub = document.createElement('div');
+  sub.className = 'ticket-sub';
+  sub.textContent = ticket.sessionTitle || sessionTitleFor(ticket.key);
+  head.append(kicker, title, sub);
+
+  const body = document.createElement('div');
+  body.className = 'ticket-sheet-body';
+  if (ticket.kind === 'permission') buildPermissionBody(ticket, body);
+  else if (ticket.kind === 'question') buildQuestionBody(ticket, body);
+  else buildPlanBody(ticket, body);
+
+  const actions = document.createElement('div');
+  actions.className = 'ticket-actions';
+  if (ticket.kind === 'permission') buildPermissionActions(ticket, sheet, actions);
+  else if (ticket.kind === 'question') buildQuestionActions(ticket, sheet, actions);
+  else buildPlanActions(ticket, sheet, actions);
+
+  sheet.append(head, body, actions);
+  sheet.addEventListener('keydown', (event) => {
+    if (event.target.matches('textarea, input, select')) return;
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      sheet.querySelector('.ticket-sign')?.click();
+    } else if (event.key === 'Enter' && event.shiftKey) {
+      event.preventDefault();
+      sheet.querySelector('.ticket-reject')?.click();
+    }
+  });
+  return sheet;
+}
+
+function collectTicketAnswers(sheet, ticket) {
+  const answers = {};
+  const blocks = sheet.querySelectorAll('.ticket-question');
+  for (const block of blocks) {
+    const index = Number(block.dataset.index);
+    const question = ticket.questions?.[index];
+    if (!question) continue;
+    const checked = block.querySelectorAll(
+      'input[type="radio"]:checked, input[type="checkbox"]:checked'
+    );
+    const values = [];
+    for (const input of checked) {
+      if (input.value === '__other__') {
+        const free = block.querySelector('.ticket-other');
+        if (free && free.value.trim()) values.push(free.value.trim());
+      } else {
+        values.push(input.value);
+      }
+    }
+    if (values.length > 0) answers[question.question] = values.join(', ');
+  }
+  return answers;
+}
+
+async function switchPlanPermissionMode(key) {
+  if (!state.startedKeys.has(key)) return;
+  let result;
+  try {
+    result = await window.desk.setPermissionMode({ key, mode: 'default' });
+  } catch (error) {
+    result = { ok: false, error: error?.message || String(error) };
+  }
+  if (!result?.ok) {
+    showError(result?.error || '切换权限模式失败');
+    return;
+  }
+  state.modeByKey.set(key, 'default');
+  state.permissionMode = 'default';
+  if (key === state.activeKey) renderPermissionMode('default');
+  await window.desk.saveSettings({ permissionMode: 'default' });
+}
+
+async function submitTicket(ticket, action, sheet) {
+  if (!ticket || state.ticketSubmitting === ticket.id) return;
+  const key = ticket.key;
+  state.ticketSubmitting = ticket.id;
+  sheet.querySelectorAll('button').forEach((button) => {
+    button.disabled = true;
+  });
+
+  let result;
+  try {
+    if (ticket.kind === 'permission') {
+      result = await window.desk.respondPermission({ key, id: ticket.id, decision: action });
+    } else if (ticket.kind === 'question') {
+      const answers = action === 'skip' ? {} : collectTicketAnswers(sheet, ticket);
+      result =
+        Object.keys(answers).length > 0
+          ? await window.desk.respondQuestion({ key, id: ticket.id, answers })
+          : await window.desk.respondQuestion({
+              key,
+              id: ticket.id,
+              response:
+                action === 'skip'
+                  ? '用户跳过了这些问题，请自行判断后继续。'
+                  : '用户没有做出选择，请自行判断后继续。',
+            });
+    } else {
+      const feedback = sheet.querySelector('.ticket-feedback')?.value.trim() || '';
+      result = await window.desk.respondPlan({
+        key,
+        id: ticket.id,
+        decision: action === 'approve' ? 'approve' : 'reject',
+        feedback: action === 'reject' ? feedback : undefined,
+      });
+    }
+  } catch (error) {
+    result = { ok: false, error: error?.message || String(error) };
+  }
+
+  if (result?.ok) {
+    const stamp = document.createElement('div');
+    stamp.className = 'ticket-stamp';
+    stamp.textContent = ticketResultLabel(ticket, action);
+    sheet.appendChild(stamp);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+
+  ticket.status =
+    action === 'deny' || action === 'reject' || action === 'skip' ? 'rejected' : 'approved';
+  removeTicket(ticket);
+
+  if (ticket.kind === 'plan' && action === 'approve' && result?.ok) {
+    await switchPlanPermissionMode(key);
+  }
+
+  if (result?.ok) {
+    setSessionStatus(key, 'working');
+    rememberActivity(key, '等待模型响应…');
+    if (key === state.activeKey) setActivity('等待模型响应…');
+  } else {
+    setSessionStatus(key, null);
+    if (key === state.activeKey) clearActivity();
+    if (result?.error) showError(result.error);
+  }
+
+  if (!hasPendingPromptFor(key)) resumeTurnTiming(key);
+  recalcAwaitingUser();
+  renderInlineApprovals(key);
+  renderSessionGroups();
+  state.ticketSubmitting = null;
 }
 
 /* ---------------- 提问面板 ---------------- */
@@ -4393,6 +5041,17 @@ function setModalHeading(modal, base, key) {
 }
 
 function showQuestion(key, request) {
+  if (state.uiMode === 'ticket') {
+    openTicket(
+      key,
+      buildQuestionTicket({
+        key,
+        request,
+        sessionTitle: sessionTitleFor(key),
+      })
+    );
+    return;
+  }
   request.__key = key;
   state.questionQueue.push(request);
   pumpQuestions();
@@ -4543,6 +5202,7 @@ function hasPendingPromptFor(key) {
       state.currentQuestion?.__key === key ||
       state.permissionQueue.some((entry) => entry.key === key) ||
       state.questionQueue.some((request) => request.__key === key) ||
+      (state.ticketQueueByKey.get(key) || []).some((ticket) => ticket.status === 'pending') ||
       hasPendingPlan(key)
   );
 }
@@ -4830,6 +5490,18 @@ function handlePlan(key, request) {
   };
   state.pendingPlans.set(planKey, pendingRecord);
 
+  if (state.uiMode === 'ticket') {
+    openTicket(
+      key,
+      buildPlanTicket({
+        key,
+        request,
+        sessionTitle: sessionTitleFor(key),
+      })
+    );
+    return;
+  }
+
   setSessionStatus(key, 'waiting');
   pauseTurnTiming(key);
   if (key === state.activeKey) {
@@ -4870,6 +5542,10 @@ function handlePlan(key, request) {
 /** 切换会话、历史渲染完成后，把该会话所有待审批计划补成可操作卡片。 */
 function applyPendingPlans(key) {
   if (!key || key !== state.activeKey || state.replaying) return;
+  if (state.uiMode === 'ticket') {
+    renderInlineApprovals(key);
+    return;
+  }
   for (const pendingRecord of [...state.pendingPlans.values()]) {
     if (pendingRecord.key !== key) continue;
     const existing = state.planCards.get(pendingRecord.planKey);
@@ -5761,6 +6437,7 @@ async function init() {
     if (!key) return;
     state.startedKeys.delete(key);
     state.activityByKey.delete(key);
+    if (state.uiMode === 'ticket') expireTicketsForKey(key);
     if (state.activeKey === key) {
       state.sessionActive = false;
       setRunning(false);
@@ -5777,6 +6454,8 @@ async function init() {
     }
   });
 
+  setInterval(updateTicketClocks, 1000);
+  refreshTodayUsage();
   els.input.focus();
   autosize();
 }

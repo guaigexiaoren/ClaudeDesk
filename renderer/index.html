@@ -62,34 +62,26 @@
           </div>
         </div>
 
-        <div class="sidebar-section trash-section">
-          <button id="trash-toggle" class="trash-toggle">
-            <span id="trash-arrow" class="trash-arrow">▸</span>
-            <span class="trash-label">🗑 回收站</span>
-            <span id="trash-count" class="trash-count">0</span>
-          </button>
-          <div id="trash-list" class="session-list" hidden></div>
-        </div>
-
         <div class="sidebar-footer">
-          <div class="footer-actions">
-            <button id="open-usage" class="ghost-button" title="用量统计">
+          <div id="trash-list" class="session-list trash-list" hidden></div>
+          <div class="foot-line">
+            <button id="trash-toggle" class="foot-button trash-toggle">
+              <span id="trash-arrow" class="trash-arrow">▸</span>
               <svg
                 viewBox="0 0 16 16"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="1.5"
                 stroke-linecap="round"
+                stroke-linejoin="round"
                 aria-hidden="true"
               >
-                <path d="M2.5 13.5h11"></path>
-                <path d="M4.5 13.5V9"></path>
-                <path d="M8 13.5V5"></path>
-                <path d="M11.5 13.5V2.5"></path>
+                <path d="M3 5h10M6 5V3.8h4V5M4.4 5l.6 8h6l.6-8M6.8 7.5v3M9.2 7.5v3"></path>
               </svg>
-              <span>用量</span>
+              <span class="trash-label">回收站</span>
+              <span id="trash-count" class="trash-count">0</span>
             </button>
-            <button id="open-settings" class="ghost-button" title="设置">
+            <button id="open-settings" class="foot-button" title="设置">
               <svg
                 viewBox="0 0 16 16"
                 fill="none"
@@ -105,6 +97,10 @@
               <span>设置</span>
             </button>
           </div>
+          <button id="open-usage" class="usage-line" title="今日用量">
+            <span>今日用量</span>
+            <span id="today-usage" class="usage-value">—</span>
+          </button>
         </div>
       </aside>
 
@@ -113,9 +109,9 @@
           <div class="topbar-left">
             <span id="status-dot" class="dot idle"></span>
             <span id="session-title">新会话</span>
-            <span id="session-turn-time" class="session-turn" hidden></span>
           </div>
           <div class="topbar-right">
+            <span id="session-turn-time" class="session-turn" hidden></span>
             <div class="control permission-control">
               <button id="permission-button" class="permission-button" title="权限模式">
                 <span id="permission-label">请求批准</span>
