@@ -126,7 +126,7 @@ test('计划模式下普通工具自动允许，不再弹权限', async () => {
   assert.equal(request, null);
 });
 
-test('计划模式下提问和计划提交仍走各自事件', async () => {
+test('计划模式下提问自动拒绝，计划提交仍走事件', async () => {
   const session = new SessionManager();
   session.permissionMode = 'plan';
 
@@ -134,14 +134,14 @@ test('计划模式下提问和计划提交仍走各自事件', async () => {
   session.on('question', (payload) => {
     question = payload;
   });
-  const questionPending = session._askPermission(
+  const questionResult = await session._askPermission(
     'AskUserQuestion',
     { questions: QUESTIONS },
     {}
   );
-  assert.ok(question);
-  session.respondQuestion(question.id, { response: '继续' });
-  assert.equal((await questionPending).behavior, 'allow');
+  assert.equal(questionResult.behavior, 'deny');
+  assert.match(questionResult.message, /计划模式/);
+  assert.equal(question, null);
 
   let plan = null;
   session.on('plan', (payload) => {

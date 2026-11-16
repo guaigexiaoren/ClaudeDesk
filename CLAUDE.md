@@ -40,7 +40,7 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 ### 主进程（`electron/`，CommonJS）
 
 - `main.js`：窗口、托盘、快速提问窗口、菜单和全部 IPC。`sessions` Map 按 key 管理多个 `SessionManager`；所有推给渲染层的事件都带 key；空闲会话默认 30 分钟回收（`CLAUDE_DESK_IDLE_MS` 可调）。
-- `session.js`：`MessageQueue` + `SessionManager`。用流式输入 `query({ prompt: asyncIterable })` 保持一个 CLI 子进程多轮对话；`canUseTool` 按工具名分流：普通工具走 permission，`AskUserQuestion` 走 question，`ExitPlanMode` 走 plan；`interrupt`、`close`、`_settlePending` 负责收尾，避免权限 Promise 悬挂。
+- `session.js`：`MessageQueue` + `SessionManager`。用流式输入 `query({ prompt: asyncIterable })` 保持一个 CLI 子进程多轮对话；`canUseTool` 按工具名分流：普通工具走 permission，`AskUserQuestion` 走 question，`ExitPlanMode` 走 plan；计划模式下普通工具自动允许、`AskUserQuestion` 自动拒绝（避免打断计划），只有 `ExitPlanMode` 进入计划审批。`interrupt`、`close`、`_settlePending` 负责收尾，避免权限 Promise 悬挂。
 - `preload.cjs`：`contextBridge` 暴露 `window.desk` 白名单接口和事件订阅，渲染层只能通过这些接口访问主进程。
 - `store.js`：`app.getPath('userData')/settings.json` 的原子读写（临时文件 + rename）。
 - `update-check.js`：比较 GitHub main 最新提交/版本与本地构建信息，纯函数可单测；构建时由 `tools/write-build-info.js` 写入 `electron/build-info.json`。
