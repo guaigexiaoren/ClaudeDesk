@@ -276,6 +276,8 @@ const els = {
   fontSizeValue: $('font-size-value'),
   settingsCwd: $('settings-cwd'),
   settingsVersion: $('settings-version'),
+  checkUpdate: $('check-update'),
+  updateDetail: $('update-detail'),
   mcpList: $('mcp-list'),
   mcpRefresh: $('mcp-refresh'),
   conciseMode: $('concise-mode'),
@@ -2128,6 +2130,82 @@ function toggleSessionSearch(show) {
   }
 }
 
+let updateChecked = false;
+let updateChecking = false;
+
+function formatUpdateTime(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function renderUpdateResult(result) {
+  const current = result.current || {};
+  const remote = result.remote || {};
+  const lines = [];
+  if (result.hasUpdate) {
+    if (result.reason === 'version') {
+      lines.push(`发现新版本 ${remote.version || '未知版本'}（当前 ${current.version || '未知'}）`);
+    } else {
+      const sha = String(remote.sha || '').slice(0, 7);
+      lines.push(`GitHub main 有新提交${sha ? ` ${sha}` : ''}`);
+    }
+  } else {
+    lines.push(`已是最新（当前 ${current.version || '未知版本'}）`);
+  }
+  const currentCommit = current.commit ? String(current.commit).slice(0, 7) : '';
+  const builtAt = formatUpdateTime(current.builtAt);
+  lines.push(
+    `当前构建：${currentCommit || '未知'}${current.dirty ? '（含未提交改动）' : ''}${
+      builtAt ? ` · ${builtAt}` : ''
+    }`
+  );
+  if (remote.sha) {
+    const remoteDate = formatUpdateTime(remote.date);
+    lines.push(
+      `GitHub main：${String(remote.sha).slice(0, 7)}${remoteDate ? ` · ${remoteDate}` : ''}`
+    );
+    if (remote.message) lines.push(remote.message);
+  }
+
+  els.updateDetail.innerHTML = '';
+  const text = document.createElement('div');
+  text.className = 'update-detail-text';
+  text.textContent = lines.join('\n');
+  els.updateDetail.appendChild(text);
+  if (result.url && /^https:\/\//.test(result.url)) {
+    const link = document.createElement('a');
+    link.href = result.url;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    link.textContent = result.hasUpdate ? '打开 GitHub 查看更新' : '打开 GitHub 仓库';
+    els.updateDetail.appendChild(link);
+  }
+  els.updateDetail.hidden = false;
+}
+
+async function checkForUpdates(force = false) {
+  if (updateChecking) return;
+  if (updateChecked && !force) return;
+  updateChecking = true;
+  updateChecked = true;
+  els.checkUpdate.disabled = true;
+  els.checkUpdate.textContent = '检查中…';
+  els.updateDetail.hidden = false;
+  els.updateDetail.textContent = '正在检查 GitHub 上的最新提交…';
+  try {
+    const result = await window.desk.checkUpdate();
+    if (!result?.ok) throw new Error(result?.error || '检查失败');
+    renderUpdateResult(result);
+  } catch (error) {
+    els.updateDetail.textContent = `检查更新失败：${error?.message || error}`;
+  } finally {
+    updateChecking = false;
+    els.checkUpdate.disabled = false;
+    els.checkUpdate.textContent = '检查更新';
+  }
+}
+
 function switchSettingsTab(tab) {
   if (tab === 'usage') tab = 'general';
   state.settingsTab = tab;
@@ -2150,6 +2228,7 @@ function switchSettingsTab(tab) {
     setFormError(els.skillFormError, '');
     refreshSkills();
   }
+  if (tab === 'about' && !updateChecked) checkForUpdates();
 }
 
 function resetConversation() {
@@ -5393,7 +5472,11 @@ async function init() {
     els.fontSizeValue.textContent = String(fontSize);
     document.documentElement.style.setProperty('--base-font-size', `${fontSize}px`);
 
-    els.settingsVersion.textContent = `ClaudeDesk ${initial.version}`;
+    const build = initial.build || {};
+    const buildCommit = build.commit
+      ? ` · ${String(build.commit).slice(0, 7)}${build.dirty ? ' (未提交)' : ''}`
+      : '';
+    els.settingsVersion.textContent = `ClaudeDesk ${initial.version}${buildCommit}`;
     setCwd(state.settings.cwd || '', false);
     if (!state.cwd) {
       setCwd(initial.defaultCwd || '', false);
@@ -5578,6 +5661,7 @@ async function init() {
     refreshEnvStatus();
     loadGlobalRules();
   });
+  els.checkUpdate.addEventListener('click', () => checkForUpdates(true));
   els.mcpRefresh.addEventListener('click', refreshMcp);
   els.envRefresh.addEventListener('click', refreshEnvStatus);
   els.providerAdd.addEventListener('click', () => openProviderForm());

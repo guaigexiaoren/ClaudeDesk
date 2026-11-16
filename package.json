@@ -7,7 +7,7 @@
   "author": "YYMY",
   "license": "MIT",
   "scripts": {
-    "build:renderer": "esbuild renderer/app.js --bundle --minify --outfile=renderer/bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning && esbuild renderer/highlight-entry.js --bundle --minify --outfile=renderer/highlight.bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning",
+    "build:renderer": "node tools/write-build-info.js && esbuild renderer/app.js --bundle --minify --outfile=renderer/bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning && esbuild renderer/highlight-entry.js --bundle --minify --outfile=renderer/highlight.bundle.js --format=iife --platform=browser --target=chrome120 --log-level=warning",
     "prestart": "npm run build:renderer",
     "start": "electron .",
     "test": "node --test",

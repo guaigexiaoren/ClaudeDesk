@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('desk', {
   // 应用
   getState: () => ipcRenderer.invoke('app:get-state'),
   saveSettings: (patch) => ipcRenderer.invoke('app:save-settings', patch),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
   pickAttachments: () => ipcRenderer.invoke('dialog:pick-attachments'),
   describeFile: (path) => ipcRenderer.invoke('file:describe', { path }),

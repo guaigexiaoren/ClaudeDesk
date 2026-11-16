@@ -58,6 +58,7 @@ const {
   installSkillFromDir,
   removeSkill,
 } = require('./skills');
+const { evaluateUpdate } = require('./update-check');
 
 const IS_SMOKE =
   process.argv.includes('--smoke') ||
@@ -75,6 +76,22 @@ const IS_SMOKE_PLAN = process.argv.includes('--smoke-plan');
 const IS_SMOKE_QUESTION = process.argv.includes('--smoke-question');
 const IS_SMOKE_BYPASS = process.argv.includes('--smoke-bypass');
 const IS_SMOKE_STEER = process.argv.includes('--smoke-steer');
+
+const UPDATE_REPO = 'guaigexiaoren/ClaudeDesk';
+const UPDATE_BRANCH = 'main';
+const UPDATE_COMMITS_API = `https://api.github.com/repos/${UPDATE_REPO}/commits/${UPDATE_BRANCH}`;
+const UPDATE_PACKAGE_URL = `https://raw.githubusercontent.com/${UPDATE_REPO}/${UPDATE_BRANCH}/package.json`;
+const UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
+
+function readBuildInfo() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8'));
+  } catch {
+    return { version: app.getVersion(), commit: '', branch: '', dirty: false, builtAt: '' };
+  }
+}
+
+const BUILD_INFO = readBuildInfo();
 
 let mainWindow = null;
 let quickWindow = null;
@@ -619,6 +636,32 @@ async function runUiSmoke() {
   console.log('SMOKE_UI_ACCENT', accent);
   console.log('SMOKE_UI_TRASH', trash);
   console.log('SMOKE_UI_MCP', mcp);
+  const about = await wc.executeJavaScript(`(() => {
+    document.getElementById('open-settings').click();
+    const tab = document.querySelector('.settings-tab[data-settings-tab="about"]');
+    if (tab) tab.click();
+    return JSON.stringify({
+      button: !!document.getElementById('check-update'),
+      detail: !document.getElementById('update-detail').hidden,
+      text: (document.getElementById('update-detail').textContent || '').slice(0, 40),
+    });
+  })()`);
+  console.log('SMOKE_UI_ABOUT', about);
+  try {
+    const update = await wc.executeJavaScript(`window.desk.checkUpdate()`);
+    console.log(
+      'SMOKE_UI_UPDATE',
+      JSON.stringify({
+        ok: update?.ok,
+        hasUpdate: update?.hasUpdate,
+        current: update?.current?.version,
+        remote: update?.remote?.sha ? update.remote.sha.slice(0, 7) : '',
+        error: update?.error || '',
+      })
+    );
+  } catch (error) {
+    console.log('SMOKE_UI_UPDATE_ERROR', error?.message || String(error));
+  }
   app.quit();
 }
 
@@ -814,6 +857,24 @@ function resolveClaudeExecutable() {
     `claude-agent-sdk-${process.platform}-${process.arch}`,
     binary
   );
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 15_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await net.fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': `ClaudeDesk/${app.getVersion()}`,
+      },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchModelsDevRaw() {
@@ -1286,6 +1347,7 @@ function registerIpc() {
         ok: true,
         settings,
         version: app.getVersion(),
+        build: BUILD_INFO,
         electron: process.versions.electron,
         homeDir: app.getPath('home'),
         defaultCwd: settings.cwd || app.getPath('home'),
@@ -1297,6 +1359,48 @@ function registerIpc() {
   ipcMain.handle(
     'app:save-settings',
     safe(async (patch) => ({ ok: true, settings: store.merge(patch) }))
+  );
+
+  ipcMain.handle(
+    'update:check',
+    safe(async () => {
+      const commitRaw = await fetchJsonWithTimeout(UPDATE_COMMITS_API);
+      let remoteVersion = '';
+      try {
+        const remotePackage = await fetchJsonWithTimeout(UPDATE_PACKAGE_URL);
+        remoteVersion = remotePackage?.version || '';
+      } catch {
+        // 版本号读不到时仍然可以按 main 的提交时间和构建时间判断
+      }
+      const remoteCommit = {
+        sha: commitRaw?.sha || '',
+        date: commitRaw?.commit?.committer?.date || commitRaw?.commit?.author?.date || '',
+        message: String(commitRaw?.commit?.message || '').split('\n')[0],
+        htmlUrl: commitRaw?.html_url || '',
+      };
+      const evaluation = evaluateUpdate({
+        currentVersion: BUILD_INFO.version || app.getVersion(),
+        buildTime: BUILD_INFO.builtAt || '',
+        buildCommit: BUILD_INFO.commit || '',
+        remoteVersion,
+        remoteCommit,
+      });
+      return {
+        ok: true,
+        current: {
+          version: BUILD_INFO.version || app.getVersion(),
+          commit: BUILD_INFO.commit || '',
+          branch: BUILD_INFO.branch || '',
+          dirty: Boolean(BUILD_INFO.dirty),
+          builtAt: BUILD_INFO.builtAt || '',
+        },
+        remote: { version: remoteVersion, ...remoteCommit },
+        hasUpdate: evaluation.hasUpdate,
+        reason: evaluation.reason,
+        url: remoteCommit.htmlUrl || UPDATE_REPO_URL,
+        checkedAt: new Date().toISOString(),
+      };
+    })
   );
 
   ipcMain.handle(

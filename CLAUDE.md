@@ -8,7 +8,7 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 
 - 复用本机 `~/.claude` 的登录、配置和 MCP；应用自身不管理账号、不保存 API Key。
 - 支持多会话并行：会话由渲染进程生成 key，后端每个 key 一个 CLI 进程，事件按 key 路由；侧边栏每个会话有独立状态灯。
-- 其他主要能力：图片附件（真实图片块）、文件附件（只记录绝对路径）、四种权限模式、计划审批、历史分页、上下文压缩提示、托盘与全局快速提问。
+- 其他主要能力：图片附件（真实图片块）、文件附件（只记录绝对路径）、四种权限模式、计划审批、历史分页、上下文压缩提示、托盘与全局快速提问、GitHub 更新检查。
 - 主要面向 Windows x64（绿色 zip / 便携 exe）；macOS 可在 Mac 上打包。
 
 ## 常用命令
@@ -17,7 +17,7 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 npm install
 npm start                  # 开发运行；prestart 会先执行 build:renderer
 npm run build:renderer     # esbuild 构建 bundle.js / bundle.css / highlight.bundle.js
-npm test                   # node --test，共 89 项单元测试
+npm test                   # node --test，共 93 项单元测试
 node --test tests/format.test.js                                     # 只跑一个测试文件
 node --test --test-name-pattern="关键词" tests/session-groups.test.js  # 只跑匹配的用例
 node tools/e2e-session.js  # 端到端冒烟：真实拉起 Claude（会消耗少量额度）
@@ -43,6 +43,7 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 - `session.js`：`MessageQueue` + `SessionManager`。用流式输入 `query({ prompt: asyncIterable })` 保持一个 CLI 子进程多轮对话；`canUseTool` 按工具名分流：普通工具走 permission，`AskUserQuestion` 走 question，`ExitPlanMode` 走 plan；`interrupt`、`close`、`_settlePending` 负责收尾，避免权限 Promise 悬挂。
 - `preload.cjs`：`contextBridge` 暴露 `window.desk` 白名单接口和事件订阅，渲染层只能通过这些接口访问主进程。
 - `store.js`：`app.getPath('userData')/settings.json` 的原子读写（临时文件 + rename）。
+- `update-check.js`：比较 GitHub main 最新提交/版本与本地构建信息，纯函数可单测；构建时由 `tools/write-build-info.js` 写入 `electron/build-info.json`。
 
 ### 渲染层（`renderer/`，ESM 源码）
 

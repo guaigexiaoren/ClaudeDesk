@@ -4,5 +4,6 @@ dist/
 renderer/bundle.js
 renderer/bundle.css
 renderer/highlight.bundle.js
+electron/build-info.json
 *.log
 .DS_Store
