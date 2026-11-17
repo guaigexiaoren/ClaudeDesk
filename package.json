@@ -1,7 +1,7 @@
 {
   "name": "claude-desk",
   "productName": "ClaudeDesk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "ClaudeDesk - 基于 Claude Code 的桌面图形工作台",
   "main": "electron/main.js",
   "author": "YYMY",
@@ -13,6 +13,7 @@
     "test": "node --test",
     "pack": "npm run build:renderer && electron-builder --dir",
     "dist": "npm run build:renderer && electron-builder --win portable zip",
+    "release": "npm version patch --no-git-tag-version --force && npm run dist",
     "dist:zip": "npm run build:renderer && electron-builder --win zip",
     "dist:portable": "npm run build:renderer && electron-builder --win portable",
     "dist:mac": "npm run build:renderer && electron-builder --mac dmg zip"
@@ -51,7 +52,7 @@
       "icon": "build/icon.png"
     },
     "portable": {
-      "artifactName": "ClaudeDesk.exe"
+      "artifactName": "ClaudeDesk-${version}.exe"
     },
     "mac": {
       "target": [

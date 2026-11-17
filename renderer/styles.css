@@ -2777,7 +2777,7 @@ select:hover {
   padding: 7px 9px;
   border-radius: 8px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--sidebar-font-size);
 }
 
 .trash-row:hover {

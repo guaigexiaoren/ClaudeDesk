@@ -1568,7 +1568,13 @@ function handleSessionState(key, payload) {
 
   const wasRunning = state.running;
   // starting 只是 CLI 在启动/恢复，不代表有回合在跑，不显示停止按钮
-  if (payload.status === 'running') setRunning(true);
+  if (payload.status === 'running') {
+    setRunning(true);
+    // 发送后到首个流式事件之间也要显示“运行中”，但不能盖掉等待审批状态
+    if (state.sessionStatus.get(key) !== 'waiting' && !hasPendingPlan(key)) {
+      setSessionStatus(key, 'working');
+    }
+  }
   if (
     (payload.status === 'starting' || payload.status === 'running') &&
     !state.activityStartedAt &&
@@ -1937,12 +1943,16 @@ function setSessionStatus(key, status) {
 function applySessionStatusToDom(sessionId) {
   const key = state.sessionKeys.get(sessionId);
   const status = key ? state.sessionStatus.get(key) : null;
+  const activity = key ? state.activityByKey.get(key) : null;
+  const ticketCount = key ? pendingTicketCount(key) : 0;
   for (const item of els.sessionList.querySelectorAll('.session-item')) {
     if (item.dataset.sessionId !== sessionId) continue;
     const dot = item.querySelector('.session-status');
     if (dot) dot.className = `session-status session-light${status ? ` ${status}` : ''}`;
     item.classList.remove('status-working', 'status-waiting', 'status-done', 'status-error');
     if (status) item.classList.add(`status-${status}`);
+    const metaText = item.querySelector('.meta-text');
+    if (metaText) metaText.textContent = sessionMetaText(status, ticketCount, activity);
   }
 }
 
@@ -2012,6 +2022,9 @@ function trackBackgroundActivity(key, message) {
 function rememberActivity(key, label, startedAt = performance.now()) {
   if (!key) return;
   state.activityByKey.set(key, { label, startedAt });
+  // 后台会话的具体动作字（正在运行 Bash…）实时同步到侧栏
+  const sessionId = state.keyToSession.get(key);
+  if (sessionId && key !== state.activeKey) applySessionStatusToDom(sessionId);
 }
 
 function setRunning(running) {
@@ -2491,6 +2504,17 @@ function toggleGroupCollapsed(groupKey, restoreFocus = false) {
   header?.querySelector('.group-toggle')?.focus({ preventScroll: true });
 }
 
+function sessionMetaText(sessionStatus, ticketCount, activity) {
+  if (activity?.label) return activity.label;
+  if (sessionStatus === 'working') return '运行中';
+  if (sessionStatus === 'waiting') {
+    return ticketCount > 0 ? `${ticketCount} 项待审批` : '等待审批';
+  }
+  if (sessionStatus === 'error') return '出错';
+  if (sessionStatus === 'done') return '已完成';
+  return '空闲';
+}
+
 function renderSessionItem(session) {
   const item = document.createElement('div');
   item.className = 'session-item';
@@ -2531,17 +2555,7 @@ function renderSessionItem(session) {
   meta.className = 'session-meta';
   const metaText = document.createElement('span');
   metaText.className = 'meta-text';
-  metaText.textContent =
-    activity?.label ||
-    (sessionStatus === 'waiting'
-      ? ticketCount > 0
-        ? `${ticketCount} 项待审批`
-        : '等待审批'
-      : sessionStatus === 'error'
-        ? '出错'
-        : sessionStatus === 'done'
-          ? '已完成'
-          : '空闲');
+  metaText.textContent = sessionMetaText(sessionStatus, ticketCount, activity);
   const metaTime = document.createElement('span');
   metaTime.className = 'meta-time';
   metaTime.textContent = relativeTime(session.lastModified);
@@ -4262,8 +4276,8 @@ async function resumeSession(session) {
     }
 
     renderHistoryWindow(messages, session.sessionId, renderedUuids);
-    // 历史里最后一个工具调用没有结果，说明当时被中断了
-    markUnfinishedTools();
+    // 只有已经结束的会话才能断定工具被中断；后台仍在运行时保持“运行中”
+    if (!busy) markUnfinishedTools();
     loadLastTurn(session.sessionId, key, token);
   } catch (error) {
     historyFailed = true;
@@ -4308,46 +4322,13 @@ async function resumeSession(session) {
       if (state.activeKey) window.desk.focusSession({ key: state.activeKey });
       return;
     }
-    // 后端已被空闲回收：清掉本地标记，下面会重新恢复
+    // 后端已被空闲回收：清掉本地标记；下次发送消息时会重新恢复
     if (focus && focus.attached === false) {
       state.startedKeys.delete(key);
       state.sessionActive = false;
     }
   }
-  if (!state.startedKeys.has(key)) {
-    if (token !== state.switchToken) return;
-    if (!state.awaitingUser) setActivity('正在恢复会话…');
-    const mode = state.modeByKey.get(key) || state.permissionMode;
-    state.modeByKey.set(key, mode);
-    const result = await beginSession(key, () =>
-      window.desk.resumeSession({
-        key,
-        sessionId: session.sessionId,
-        cwd: dir,
-        model: state.model,
-        permissionMode: mode,
-      })
-    );
-    // 恢复期间用户又切走了：关掉刚启动的后台会话，别把它留在后台
-    if (token !== state.switchToken) {
-      window.desk.closeSession({ key });
-      if (state.activeKey) window.desk.focusSession({ key: state.activeKey });
-      return;
-    }
-    if (!result?.ok) {
-      setSessionStatus(key, null);
-      if (key === state.activeKey) {
-        setRunning(false);
-        state.sessionActive = false;
-        showError(result?.error || '恢复会话失败');
-        if (state.activityLabel === '正在恢复会话…') finishActivity('恢复失败', 'error');
-      }
-    } else {
-      state.startedKeys.add(key);
-      state.sessionActive = true;
-      if (!state.awaitingUser && state.activityLabel === '正在恢复会话…') clearActivity();
-    }
-  }
+  // 只是查看历史时不启动 CLI；第一条消息由 ensureSession() 按需恢复
   scrollToBottom(true);
   refreshSessions();
 }
