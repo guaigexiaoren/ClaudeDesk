@@ -8,7 +8,7 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 
 - 复用本机 `~/.claude` 的登录、配置和 MCP；应用自身不管理账号、不保存 API Key。
 - 支持多会话并行：会话由渲染进程生成 key，后端每个 key 一个 CLI 进程，事件按 key 路由；侧边栏每个会话有独立状态灯。
-- 其他主要能力：图片附件（真实图片块）、文件附件（只记录绝对路径）、四种权限模式、计划审批、历史分页、上下文压缩提示、托盘与全局快速提问、GitHub 更新检查。
+- 其他主要能力：图片附件（真实图片块）、文件附件（只记录绝对路径）、四种权限模式、计划审批、工单式侧栏与对话内联审批卡、历史分页、上下文压缩提示、托盘与全局快速提问、GitHub 更新检查。
 - 主要面向 Windows x64（绿色 zip / 便携 exe）；macOS 可在 Mac 上打包。
 
 ## 常用命令
@@ -17,7 +17,7 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 npm install
 npm start                  # 开发运行；prestart 会先执行 build:renderer
 npm run build:renderer     # esbuild 构建 bundle.js / bundle.css / highlight.bundle.js
-npm test                   # node --test，共 95 项单元测试
+npm test                   # node --test，共 104 项单元测试
 node --test tests/format.test.js                                     # 只跑一个测试文件
 node --test --test-name-pattern="关键词" tests/session-groups.test.js  # 只跑匹配的用例
 node tools/e2e-session.js  # 端到端冒烟：真实拉起 Claude（会消耗少量额度）
@@ -47,7 +47,8 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 
 ### 渲染层（`renderer/`，ESM 源码）
 
-- `app.js` 是唯一 UI 源码，由 esbuild 打包成 `bundle.js` / `bundle.css`；`highlight-entry.js` 生成按需加载的懒加载包；`quick.html` + `quick.js` 是快速提问窗口；`session-groups.js`、`format.js` 是可直接测试的纯函数模块。
+- `app.js` 是唯一 UI 源码，由 esbuild 打包成 `bundle.js` / `bundle.css`；`highlight-entry.js` 生成按需加载的懒加载包；`quick.html` + `quick.js` 是快速提问窗口；`session-groups.js`、`format.js`、`ticket-facts.js` 是可直接测试的纯函数模块。
+- 渲染层默认 `uiMode: 'ticket'`：权限、提问、计划以对话内联审批卡（ticket）呈现，侧栏目录可折叠并显示待审批数量；旧的 `#question-review` 面板和计划 dock 只保留为兼容路径。
 - 关键状态集中在 `app.js` 顶部的 `state`：`activeKey`、`keyToSession/sessionKeys`、`sessionStatus`、`commandsByKey/metaByKey/modeByKey`、`historyCache/historyView`、`pendingEvents`、`switchToken`。
 - 事件流：主进程 `session:event/state/permission/question/plan/error` → preload 订阅 → `handleSessionEvent`。非当前会话只更新状态灯和后台活动计时，不渲染；当前会话才进入 `handleEvent`。
 - 切换会话用 `switchToken` 丢弃过期结果；历史只保留最近 5 个会话的内存缓存，每次只渲染最近 50 条，顶部「加载更早」按需追加。
