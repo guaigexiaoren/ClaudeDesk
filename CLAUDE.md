@@ -17,7 +17,7 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 npm install
 npm start                  # 开发运行；prestart 会先执行 build:renderer
 npm run build:renderer     # esbuild 构建 bundle.js / bundle.css / highlight.bundle.js
-npm test                   # node --test，共 93 项单元测试
+npm test                   # node --test，共 95 项单元测试
 node --test tests/format.test.js                                     # 只跑一个测试文件
 node --test --test-name-pattern="关键词" tests/session-groups.test.js  # 只跑匹配的用例
 node tools/e2e-session.js  # 端到端冒烟：真实拉起 Claude（会消耗少量额度）
@@ -43,7 +43,7 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 - `session.js`：`MessageQueue` + `SessionManager`。用流式输入 `query({ prompt: asyncIterable })` 保持一个 CLI 子进程多轮对话；`canUseTool` 按工具名分流：普通工具走 permission，`AskUserQuestion` 走 question，`ExitPlanMode` 走 plan；计划模式下普通工具自动允许、`AskUserQuestion` 自动拒绝（避免打断计划），只有 `ExitPlanMode` 进入计划审批。`interrupt`、`close`、`_settlePending` 负责收尾，避免权限 Promise 悬挂。
 - `preload.cjs`：`contextBridge` 暴露 `window.desk` 白名单接口和事件订阅，渲染层只能通过这些接口访问主进程。
 - `store.js`：`app.getPath('userData')/settings.json` 的原子读写（临时文件 + rename）。
-- `update-check.js`：比较 GitHub main 最新提交/版本与本地构建信息，纯函数可单测；构建时由 `tools/write-build-info.js` 写入 `electron/build-info.json`。
+- `update-check.js`：比较 GitHub 各分支最新提交/版本与本地构建信息，纯函数可单测；构建时由 `tools/write-build-info.js` 写入 `electron/build-info.json`。
 
 ### 渲染层（`renderer/`，ESM 源码）
 

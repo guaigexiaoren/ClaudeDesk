@@ -26,8 +26,9 @@ function compareVersions(left, right) {
 }
 
 /**
- * 版本号升高，或 main 上出现了构建时间之后的新提交，都视为有更新。
- * 版本号拿不到时仍可依靠提交时间和构建时间判断。
+ * 版本号升高，或远端分支出现了当前构建没有的提交，都视为有更新。
+ * comparison 来自 GitHub compare API：ahead/diverged 且 ahead_by > 0 说明远端有新增提交。
+ * 没有 comparison 时退回提交时间和构建时间比较。
  */
 function evaluateUpdate({
   currentVersion = '',
@@ -35,19 +36,27 @@ function evaluateUpdate({
   buildCommit = '',
   remoteVersion = '',
   remoteCommit = null,
+  comparison = null,
 } = {}) {
   const versionNewer =
     Boolean(remoteVersion) && compareVersions(remoteVersion, currentVersion) > 0;
   const remoteSha = String(remoteCommit?.sha || '');
   const remoteTime = Date.parse(remoteCommit?.date || '');
   const builtAt = Date.parse(buildTime || '');
-  const commitNewer = Boolean(
-    remoteSha &&
-      Number.isFinite(remoteTime) &&
-      Number.isFinite(builtAt) &&
-      remoteTime > builtAt &&
-      remoteSha !== String(buildCommit || '')
-  );
+  let commitNewer = false;
+  if (comparison && typeof comparison === 'object') {
+    const aheadBy = Number(comparison.aheadBy) || 0;
+    commitNewer =
+      (comparison.status === 'ahead' || comparison.status === 'diverged') && aheadBy > 0;
+  } else {
+    commitNewer = Boolean(
+      remoteSha &&
+        Number.isFinite(remoteTime) &&
+        Number.isFinite(builtAt) &&
+        remoteTime > builtAt &&
+        remoteSha !== String(buildCommit || '')
+    );
+  }
 
   return {
     hasUpdate: versionNewer || commitNewer,
@@ -59,9 +68,20 @@ function evaluateUpdate({
   };
 }
 
+function pickNewestCommit(commits = []) {
+  const valid = commits.filter(
+    (item) => item && item.sha && Number.isFinite(Date.parse(item.date || ''))
+  );
+  if (valid.length === 0) return null;
+  return valid.reduce((newest, item) =>
+    Date.parse(item.date) > Date.parse(newest.date) ? item : newest
+  );
+}
+
 module.exports = {
   normalizeVersion,
   parseVersion,
   compareVersions,
   evaluateUpdate,
+  pickNewestCommit,
 };

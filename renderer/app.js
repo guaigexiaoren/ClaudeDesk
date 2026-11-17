@@ -2148,7 +2148,7 @@ function renderUpdateResult(result) {
       lines.push(`发现新版本 ${remote.version || '未知版本'}（当前 ${current.version || '未知'}）`);
     } else {
       const sha = String(remote.sha || '').slice(0, 7);
-      lines.push(`GitHub main 有新提交${sha ? ` ${sha}` : ''}`);
+      lines.push(`GitHub ${remote.branch || 'main'} 有新提交${sha ? ` ${sha}` : ''}`);
     }
   } else {
     lines.push(`已是最新（当前 ${current.version || '未知版本'}）`);
@@ -2163,7 +2163,9 @@ function renderUpdateResult(result) {
   if (remote.sha) {
     const remoteDate = formatUpdateTime(remote.date);
     lines.push(
-      `GitHub main：${String(remote.sha).slice(0, 7)}${remoteDate ? ` · ${remoteDate}` : ''}`
+      `GitHub ${remote.branch || 'main'}：${String(remote.sha).slice(0, 7)}${
+        remoteDate ? ` · ${remoteDate}` : ''
+      }`
     );
     if (remote.message) lines.push(remote.message);
   }

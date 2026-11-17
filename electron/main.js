@@ -58,7 +58,7 @@ const {
   installSkillFromDir,
   removeSkill,
 } = require('./skills');
-const { evaluateUpdate } = require('./update-check');
+const { evaluateUpdate, pickNewestCommit } = require('./update-check');
 
 const IS_SMOKE =
   process.argv.includes('--smoke') ||
@@ -79,8 +79,11 @@ const IS_SMOKE_STEER = process.argv.includes('--smoke-steer');
 
 const UPDATE_REPO = 'guaigexiaoren/ClaudeDesk';
 const UPDATE_BRANCH = 'main';
-const UPDATE_COMMITS_API = `https://api.github.com/repos/${UPDATE_REPO}/commits/${UPDATE_BRANCH}`;
-const UPDATE_PACKAGE_URL = `https://raw.githubusercontent.com/${UPDATE_REPO}/${UPDATE_BRANCH}/package.json`;
+const UPDATE_API_BASE = `https://api.github.com/repos/${UPDATE_REPO}`;
+const UPDATE_BRANCHES_API = `${UPDATE_API_BASE}/branches?per_page=100`;
+const UPDATE_COMMIT_API = `${UPDATE_API_BASE}/commits`;
+const UPDATE_COMMITS_API = `${UPDATE_COMMIT_API}/${UPDATE_BRANCH}`;
+const UPDATE_PACKAGE_API = `${UPDATE_API_BASE}/contents/package.json?ref=${UPDATE_BRANCH}`;
 const UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`;
 
 function readBuildInfo() {
@@ -656,6 +659,8 @@ async function runUiSmoke() {
         hasUpdate: update?.hasUpdate,
         current: update?.current?.version,
         remote: update?.remote?.sha ? update.remote.sha.slice(0, 7) : '',
+        branch: update?.remote?.branch || '',
+        remoteVersion: update?.remote?.version || '',
         error: update?.error || '',
       })
     );
@@ -1364,26 +1369,92 @@ function registerIpc() {
   ipcMain.handle(
     'update:check',
     safe(async () => {
-      const commitRaw = await fetchJsonWithTimeout(UPDATE_COMMITS_API);
+      let latest = null;
+      let networkError = null;
+      try {
+        const branchList = await fetchJsonWithTimeout(UPDATE_BRANCHES_API);
+        const branches = Array.isArray(branchList) ? branchList.slice(0, 15) : [];
+        const shas = new Map();
+        for (const item of branches) {
+          const sha = item?.commit?.sha;
+          if (!sha) continue;
+          if (!shas.has(sha)) shas.set(sha, []);
+          if (item.name) shas.get(sha).push(item.name);
+        }
+        const keys = [...shas.keys()];
+        const results = await Promise.allSettled(
+          keys.map((sha) => fetchJsonWithTimeout(`${UPDATE_COMMIT_API}/${sha}`))
+        );
+        const commits = [];
+        for (let i = 0; i < keys.length; i += 1) {
+          const result = results[i];
+          if (result.status !== 'fulfilled') continue;
+          const raw = result.value;
+          commits.push({
+            branch: (shas.get(keys[i]) || []).join(' / '),
+            sha: raw?.sha || keys[i],
+            date: raw?.commit?.committer?.date || raw?.commit?.author?.date || '',
+            message: String(raw?.commit?.message || '').split('\n')[0],
+            htmlUrl: raw?.html_url || '',
+          });
+        }
+        latest = pickNewestCommit(commits);
+      } catch (error) {
+        networkError = error;
+        // 分支列表不可用时退回 main
+      }
+
+      if (!latest) {
+        try {
+          const raw = await fetchJsonWithTimeout(UPDATE_COMMITS_API);
+          latest = {
+            branch: UPDATE_BRANCH,
+            sha: raw?.sha || '',
+            date: raw?.commit?.committer?.date || raw?.commit?.author?.date || '',
+            message: String(raw?.commit?.message || '').split('\n')[0],
+            htmlUrl: raw?.html_url || '',
+          };
+        } catch (error) {
+          networkError = error;
+        }
+      }
+
       let remoteVersion = '';
       try {
-        const remotePackage = await fetchJsonWithTimeout(UPDATE_PACKAGE_URL);
-        remoteVersion = remotePackage?.version || '';
+        const payload = await fetchJsonWithTimeout(UPDATE_PACKAGE_API);
+        const content = String(payload?.content || '').replace(/\s+/g, '');
+        remoteVersion =
+          JSON.parse(Buffer.from(content, 'base64').toString('utf8'))?.version || '';
       } catch {
-        // 版本号读不到时仍然可以按 main 的提交时间和构建时间判断
+        // 版本号读不到时按提交判断
       }
-      const remoteCommit = {
-        sha: commitRaw?.sha || '',
-        date: commitRaw?.commit?.committer?.date || commitRaw?.commit?.author?.date || '',
-        message: String(commitRaw?.commit?.message || '').split('\n')[0],
-        htmlUrl: commitRaw?.html_url || '',
-      };
+
+      if (!latest?.sha && !remoteVersion) {
+        throw new Error(networkError?.message || '无法获取 GitHub 最新提交');
+      }
+
+      let comparison = null;
+      if (BUILD_INFO.commit && latest.sha && latest.sha !== BUILD_INFO.commit) {
+        try {
+          const raw = await fetchJsonWithTimeout(
+            `${UPDATE_API_BASE}/compare/${BUILD_INFO.commit}...${latest.sha}`
+          );
+          comparison = {
+            status: raw?.status || '',
+            aheadBy: Number(raw?.ahead_by) || 0,
+          };
+        } catch {
+          // compare 失败时退回提交时间
+        }
+      }
+
       const evaluation = evaluateUpdate({
         currentVersion: BUILD_INFO.version || app.getVersion(),
         buildTime: BUILD_INFO.builtAt || '',
         buildCommit: BUILD_INFO.commit || '',
         remoteVersion,
-        remoteCommit,
+        remoteCommit: latest,
+        comparison,
       });
       return {
         ok: true,
@@ -1394,10 +1465,10 @@ function registerIpc() {
           dirty: Boolean(BUILD_INFO.dirty),
           builtAt: BUILD_INFO.builtAt || '',
         },
-        remote: { version: remoteVersion, ...remoteCommit },
+        remote: { version: remoteVersion, ...latest },
         hasUpdate: evaluation.hasUpdate,
         reason: evaluation.reason,
-        url: remoteCommit.htmlUrl || UPDATE_REPO_URL,
+        url: latest.htmlUrl || UPDATE_REPO_URL,
         checkedAt: new Date().toISOString(),
       };
     })
