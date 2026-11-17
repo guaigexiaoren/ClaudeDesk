@@ -259,6 +259,7 @@ const els = {
   sessionTitle: $('session-title'),
   sessionTurnTime: $('session-turn-time'),
   sessionList: $('session-list'),
+  sessionMenu: $('session-menu'),
   addDirectory: $('add-directory'),
   trashToggle: $('trash-toggle'),
   trashArrow: $('trash-arrow'),
@@ -1070,6 +1071,8 @@ function updateToolGroup(group) {
 function appendToolUse(block) {
   if (block?.name === 'ExitPlanMode') {
     closeToolGroup();
+    // ticket 模式下实时计划由 onPlan 生成审批卡；历史回放仍创建只读计划卡
+    if (state.uiMode === 'ticket' && !state.replaying && !state.renderTarget) return null;
     return appendPlanToolCard(block);
   }
   // 同一条 tool_use 重复到达时不重复建卡
@@ -2386,6 +2389,7 @@ async function refreshSessions(force = false) {
 }
 
 function renderSessionGroups() {
+  closeSessionMenu();
   const groups = buildSessionGroups(state.sessions, state.settings.trash || [], state.cwd, {
     pinned: state.settings.pinned || [],
     query: state.searchQuery,
@@ -2518,7 +2522,9 @@ function renderSessionItem(session) {
 
   const title = document.createElement('span');
   title.className = 'title';
-  title.textContent = session.title || '未命名会话';
+  const titleText = session.title || '未命名会话';
+  title.textContent = titleText;
+  title.title = titleText;
 
   const activity = sessionKey ? state.activityByKey.get(sessionKey) : null;
   const meta = document.createElement('span');
@@ -2573,48 +2579,46 @@ function renderSessionItem(session) {
 
   const pinned = (state.settings.pinned || []).includes(session.sessionId);
   if (pinned) item.classList.add('is-pinned');
-
-  const pin = document.createElement('button');
-  pin.className = `session-action${pinned ? ' pinned' : ''}`;
-  pin.textContent = pinned ? '★' : '☆';
-  pin.title = pinned ? '取消置顶' : '置顶会话';
-  pin.addEventListener('click', (event) => {
-    event.stopPropagation();
-    togglePin(session);
-  });
-
-  const rename = document.createElement('button');
-  rename.className = 'session-action';
-  rename.textContent = '✎';
-  rename.title = '重命名会话';
-  rename.addEventListener('click', (event) => {
-    event.stopPropagation();
-    startRename(session, item);
-  });
-
-  const exportButton = document.createElement('button');
-  exportButton.className = 'session-action';
-  exportButton.textContent = '⇩';
-  exportButton.title = '导出为 Markdown';
-  exportButton.addEventListener('click', (event) => {
-    event.stopPropagation();
-    exportSession(session);
-  });
-
-  const trash = document.createElement('button');
-  trash.className = 'session-trash';
-  trash.textContent = '🗑';
-  trash.title = '移到回收站';
-  trash.addEventListener('click', (event) => {
-    event.stopPropagation();
-    moveToTrash(session);
-  });
-
-  const actions = document.createElement('div');
-  actions.className = 'session-actions';
-  actions.append(rename, exportButton, trash, pin);
-  item.appendChild(actions);
   return item;
+}
+
+function closeSessionMenu() {
+  if (els.sessionMenu.hidden) return;
+  els.sessionMenu.hidden = true;
+  els.sessionMenu.replaceChildren();
+}
+
+function openSessionMenu(session, x, y) {
+  closeSessionMenu();
+  const pinned = (state.settings.pinned || []).includes(session.sessionId);
+  const items = [
+    [pinned ? '取消置顶' : '置顶会话', 'pin'],
+    ['重命名会话', 'rename'],
+    ['导出为 Markdown', 'export'],
+    ['移到回收站', 'trash'],
+  ];
+  for (const [label, action] of items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.action = action;
+    button.textContent = label;
+    if (action === 'trash') button.classList.add('danger');
+    els.sessionMenu.appendChild(button);
+  }
+  els.sessionMenu.dataset.sessionId = session.sessionId;
+  els.sessionMenu.hidden = false;
+  const width = els.sessionMenu.offsetWidth;
+  const height = els.sessionMenu.offsetHeight;
+  els.sessionMenu.style.left = `${Math.max(
+    8,
+    Math.min(x, window.innerWidth - width - 8)
+  )}px`;
+  els.sessionMenu.style.top = `${Math.max(
+    8,
+    Math.min(y, window.innerHeight - height - 8)
+  )}px`;
+  const first = els.sessionMenu.querySelector('button');
+  if (first) first.focus();
 }
 
 function togglePin(session) {
@@ -4913,6 +4917,8 @@ async function submitTicket(ticket, action, sheet) {
                   : '用户没有做出选择，请自行判断后继续。',
             });
     } else {
+      // 和旧 submitPlanDecision 一致：提交后立即移出 pending，避免 Esc/计时/切会话残留
+      state.pendingPlans.delete(planKeyFor(ticket.key, ticket.toolUseId, ticket.id));
       const feedback = sheet.querySelector('.ticket-feedback')?.value.trim() || '';
       result = await window.desk.respondPlan({
         key,
@@ -5406,6 +5412,7 @@ function createPlanCard({
 
 function attachPlanRequest(record, pendingRecord) {
   if (!pendingRecord || !record) return;
+  if (state.uiMode === 'ticket' && (state.replaying || state.renderTarget)) return;
   const previousKey = record.planKey;
   if (pendingRecord.planKey && pendingRecord.planKey !== previousKey) {
     if (state.planCards.get(previousKey) === record) state.planCards.delete(previousKey);
@@ -5429,7 +5436,12 @@ function attachPlanRequest(record, pendingRecord) {
   record.rejectBtn.textContent = '继续修改计划';
   record.approveBtn.disabled = false;
   record.rejectBtn.disabled = false;
-  if (record.key === state.activeKey && !state.replaying && !state.renderTarget) {
+  if (
+    record.key === state.activeKey &&
+    state.uiMode !== 'ticket' &&
+    !state.replaying &&
+    !state.renderTarget
+  ) {
     mountPlanCardToDock(record);
   }
 }
@@ -6190,6 +6202,52 @@ async function init() {
   els.batchCancel.addEventListener('click', () => toggleSelectMode(false));
   updateBatchBar();
 
+  els.sessionMenu.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    const session = state.sessions.find(
+      (item) => item.sessionId === els.sessionMenu.dataset.sessionId
+    );
+    const action = button.dataset.action;
+    closeSessionMenu();
+    if (!session) return;
+    if (action === 'pin') {
+      togglePin(session);
+    } else if (action === 'rename') {
+      const item = [...els.sessionList.querySelectorAll('.session-item')].find(
+        (entry) => entry.dataset.sessionId === session.sessionId
+      );
+      if (item) startRename(session, item);
+    } else if (action === 'export') {
+      exportSession(session);
+    } else if (action === 'trash') {
+      moveToTrash(session);
+    }
+  });
+
+  els.sessionList.addEventListener('contextmenu', (event) => {
+    if (state.selectMode) return;
+    const item = event.target.closest('.session-item');
+    if (!item || event.target.closest('.rename-input')) return;
+    const session = state.sessions.find(
+      (entry) => entry.sessionId === item.dataset.sessionId
+    );
+    if (!session) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = item.getBoundingClientRect();
+    const hasPointer = event.clientX !== 0 || event.clientY !== 0;
+    openSessionMenu(
+      session,
+      hasPointer ? event.clientX : rect.left + 8,
+      hasPointer ? event.clientY : rect.bottom + 2
+    );
+  });
+
+  els.sessionList.addEventListener('scroll', closeSessionMenu, { passive: true });
+  window.addEventListener('resize', closeSessionMenu);
+  window.addEventListener('blur', closeSessionMenu);
+
 
   els.findInput.addEventListener('input', () => runFind(true, false));
   els.findInput.addEventListener('keydown', (event) => {
@@ -6273,6 +6331,10 @@ async function init() {
       return;
     }
     if (event.key !== 'Escape') return;
+    if (!els.sessionMenu.hidden) {
+      closeSessionMenu();
+      return;
+    }
     if (!els.permissionMenu.hidden) {
       els.permissionMenu.hidden = true;
       return;
@@ -6318,6 +6380,12 @@ async function init() {
   document.addEventListener('click', (event) => {
     if (!els.permissionMenu.hidden && !event.target.closest('.permission-control')) {
       els.permissionMenu.hidden = true;
+    }
+  });
+
+  document.addEventListener('mousedown', (event) => {
+    if (!els.sessionMenu.hidden && !event.target.closest('#session-menu')) {
+      closeSessionMenu();
     }
   });
 

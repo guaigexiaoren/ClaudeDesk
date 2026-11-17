@@ -607,7 +607,18 @@ async function runUiSmoke() {
 
   const trash = await wc.executeJavaScript(`(async () => {
     const count = () => document.getElementById('trash-count').textContent;
-    const button = document.querySelector('.session-item .session-trash');
+    const item = document.querySelector('.session-item');
+    if (!item) return JSON.stringify({ skipped: true });
+    const rect = item.getBoundingClientRect();
+    item.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + 20,
+        clientY: rect.top + 20,
+      })
+    );
+    const button = document.querySelector('#session-menu [data-action="trash"]');
     if (!button) return JSON.stringify({ skipped: true });
     const list = document.getElementById('trash-list');
     const before = count();
