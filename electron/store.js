@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS = {
   model: 'default',
   permissionMode: 'default',
   accent: 'claude',
+  theme: 'dark',
   trash: [],
   fontSize: 14,
   conciseMode: true,

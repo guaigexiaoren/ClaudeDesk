@@ -126,7 +126,7 @@ test('计划模式下普通工具自动允许，不再弹权限', async () => {
   assert.equal(request, null);
 });
 
-test('计划模式下提问自动拒绝，计划提交仍走事件', async () => {
+test('计划模式下提问走问答事件并可回填答案', async () => {
   const session = new SessionManager();
   session.permissionMode = 'plan';
 
@@ -134,14 +134,18 @@ test('计划模式下提问自动拒绝，计划提交仍走事件', async () =>
   session.on('question', (payload) => {
     question = payload;
   });
-  const questionResult = await session._askPermission(
+  const questionPending = session._askPermission(
     'AskUserQuestion',
     { questions: QUESTIONS },
     {}
   );
-  assert.equal(questionResult.behavior, 'deny');
-  assert.match(questionResult.message, /计划模式/);
-  assert.equal(question, null);
+  assert.ok(question, '计划模式下应该发出 question 事件');
+  session.respondQuestion(question.id, {
+    answers: { '用哪个 Markdown 库？': 'marked' },
+  });
+  const questionResult = await questionPending;
+  assert.equal(questionResult.behavior, 'allow');
+  assert.deepEqual(questionResult.updatedInput.answers, { '用哪个 Markdown 库？': 'marked' });
 
   let plan = null;
   session.on('plan', (payload) => {

@@ -5,6 +5,14 @@ const hint = document.querySelector('.quick-hint');
 const HINT = 'Enter 发送并切到主窗口 · Esc 关闭';
 let sending = false;
 
+/** 启动时从 URL 取主题，之后每次显示由主进程推送最新主题。 */
+function applyTheme(value) {
+  document.documentElement.dataset.theme = value === 'light' ? 'light' : 'dark';
+}
+
+applyTheme(new URLSearchParams(location.search).get('theme'));
+window.desk.onQuickTheme?.((theme) => applyTheme(theme));
+
 async function submit() {
   const text = input.value.trim();
   if (!text || sending) return;

@@ -82,5 +82,6 @@ contextBridge.exposeInMainWorld('desk', {
   onMenuExport: subscribe('menu:export'),
   onMenuFind: subscribe('menu:find'),
   onQuickFocus: subscribe('quick:focus'),
+  onQuickTheme: subscribe('quick:theme'),
   onQuickSend: subscribe('quick:send'),
 });

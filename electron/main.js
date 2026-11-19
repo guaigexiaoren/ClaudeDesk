@@ -20,6 +20,7 @@ const {
 
 const { Store } = require('./store');
 const { SessionManager } = require('./session');
+const { normalizeTheme, THEME_BACKGROUNDS } = require('../renderer/theme.js');
 const { ProviderStore, buildProviderEnv } = require('./provider-store');
 const {
   appendUsage,
@@ -127,7 +128,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     show: !IS_SMOKE,
-    backgroundColor: '#16181d',
+    backgroundColor: THEME_BACKGROUNDS[normalizeTheme(settings.theme)],
     title: 'ClaudeDesk',
     icon: path.join(__dirname, '..', 'build', 'icon.png'),
     autoHideMenuBar: false,
@@ -283,6 +284,7 @@ function showMainWindow() {
 }
 
 function createQuickWindow() {
+  const theme = normalizeTheme(store.get().theme);
   quickWindow = new BrowserWindow({
     width: 680,
     height: 154,
@@ -291,7 +293,7 @@ function createQuickWindow() {
     show: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    backgroundColor: '#101216',
+    backgroundColor: THEME_BACKGROUNDS[theme],
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -299,7 +301,9 @@ function createQuickWindow() {
       sandbox: true,
     },
   });
-  quickWindow.loadFile(path.join(__dirname, '..', 'renderer', 'quick.html'));
+  quickWindow.loadFile(path.join(__dirname, '..', 'renderer', 'quick.html'), {
+    query: { theme },
+  });
   quickWindow.on('blur', () => {
     if (quickWindow && !quickWindow.isDestroyed()) quickWindow.hide();
   });
@@ -325,6 +329,7 @@ function showQuickWindow() {
   );
   quickWindow.show();
   quickWindow.focus();
+  quickWindow.webContents.send('quick:theme', normalizeTheme(store.get().theme));
   quickWindow.webContents.send('quick:focus');
 }
 

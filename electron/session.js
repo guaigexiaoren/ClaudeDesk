@@ -255,19 +255,14 @@ class SessionManager extends EventEmitter {
   }
 
   _askPermission(toolName, input, opts = {}) {
-    // 计划模式下不打断用户：普通工具自动允许，AskUserQuestion 自动拒绝并让模型直接出计划。
-    // ExitPlanMode 仍走计划审批，这是计划模式唯一的交互点。
-    if (this.permissionMode === 'plan') {
-      if (toolName === 'AskUserQuestion') {
-        return Promise.resolve({
-          behavior: 'deny',
-          message:
-            '当前是计划模式，请不要向用户提问；请基于现有信息直接给出计划，或把不确定点写进计划。',
-        });
-      }
-      if (toolName !== 'ExitPlanMode') {
-        return Promise.resolve({ behavior: 'allow' });
-      }
+    // 计划模式下普通工具自动允许；AskUserQuestion 仍走问答事件，允许模型先和用户对齐需求。
+    // ExitPlanMode 走计划审批，计划模式下的普通工具不打断用户。
+    if (
+      this.permissionMode === 'plan' &&
+      toolName !== 'ExitPlanMode' &&
+      toolName !== 'AskUserQuestion'
+    ) {
+      return Promise.resolve({ behavior: 'allow' });
     }
     return new Promise((resolve) => {
       const id = randomUUID();

@@ -18,6 +18,7 @@ import {
   finishTurn,
   lastTurnTiming,
 } from './turn-timing.js';
+import { normalizeTheme } from './theme.js';
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -50,6 +51,13 @@ const ACCENTS = {
   purple: { color: '#a371f7', soft: 'rgba(163, 113, 247, 0.14)', border: 'rgba(163, 113, 247, 0.35)' },
   pink: { color: '#ec6cb9', soft: 'rgba(236, 108, 185, 0.14)', border: 'rgba(236, 108, 185, 0.35)' },
   amber: { color: '#d29922', soft: 'rgba(210, 153, 34, 0.14)', border: 'rgba(210, 153, 34, 0.35)' },
+  black: {
+    color: '#1f1f1f',
+    soft: 'rgba(31, 31, 31, 0.18)',
+    border: 'rgba(31, 31, 31, 0.45)',
+    on: '#ffffff',
+  },
+  white: { color: '#f2f2f2', soft: 'rgba(242, 242, 242, 0.14)', border: 'rgba(242, 242, 242, 0.4)' },
 };
 
 const DIR_TONES = ['claude', 'blue', 'green', 'purple', 'pink', 'amber'];
@@ -155,6 +163,7 @@ const state = {
   sessions: [],
   cwd: '',
   accent: 'claude',
+  theme: 'dark',
   model: 'default',
   permissionMode: 'default',
   sessionId: null,
@@ -284,6 +293,7 @@ const els = {
   usageModal: $('usage-modal'),
   usageClose: $('usage-close'),
   accentSwatches: $('accent-swatches'),
+  themeOptions: $('theme-options'),
   fontSize: $('font-size'),
   fontSizeValue: $('font-size-value'),
   settingsCwd: $('settings-cwd'),
@@ -2123,7 +2133,24 @@ function applyAccent(key) {
   root.setProperty('--accent', accent.color);
   root.setProperty('--accent-soft', accent.soft);
   root.setProperty('--accent-border', accent.border);
+  root.setProperty('--on-accent', accent.on || '#1a120f');
   renderAccentSwatches();
+}
+
+function applyTheme(value) {
+  const theme = normalizeTheme(value);
+  state.theme = theme;
+  document.documentElement.dataset.theme = theme;
+  renderThemeOptions();
+}
+
+function renderThemeOptions() {
+  if (!els.themeOptions) return;
+  for (const button of els.themeOptions.querySelectorAll('.theme-option')) {
+    const active = button.dataset.theme === state.theme;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
 }
 
 function renderAccentSwatches() {
@@ -2131,6 +2158,8 @@ function renderAccentSwatches() {
   for (const [key, accent] of Object.entries(ACCENTS)) {
     const swatch = document.createElement('button');
     swatch.className = `swatch${key === state.accent ? ' active' : ''}`;
+    // 黑色/白色在相近底色上需要一圈描边才看得清
+    if (key === 'black' || key === 'white') swatch.classList.add('swatch-edge');
     swatch.style.background = accent.color;
     swatch.title = key;
     swatch.addEventListener('click', () => {
@@ -6136,6 +6165,9 @@ async function init() {
     state.permissionMode = modeValue;
     renderPermissionMode(modeValue);
     if (modeValue !== initialMode) window.desk.saveSettings({ permissionMode: modeValue });
+    const initialTheme = normalizeTheme(state.settings.theme);
+    applyTheme(initialTheme);
+    if (initialTheme !== state.settings.theme) window.desk.saveSettings({ theme: initialTheme });
     applyAccent(state.settings.accent || 'claude');
 
     const fontSize = state.settings.fontSize || 14;
@@ -6449,6 +6481,15 @@ async function init() {
   });
   els.fontSize.addEventListener('change', () => {
     window.desk.saveSettings({ fontSize: Number(els.fontSize.value) });
+  });
+
+  els.themeOptions?.querySelectorAll('.theme-option').forEach((button) => {
+    button.addEventListener('click', () => {
+      const theme = normalizeTheme(button.dataset.theme);
+      if (theme === state.theme) return;
+      applyTheme(theme);
+      window.desk.saveSettings({ theme });
+    });
   });
 
   window.desk.onEvent(({ key, message }) => handleSessionEvent(key, message));
