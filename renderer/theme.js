@@ -3,7 +3,7 @@
 const THEMES = ['dark', 'light'];
 
 const THEME_BACKGROUNDS = {
-  dark: '#16181d',
+  dark: '#14100e',
   light: '#f6f3ee',
 };
 

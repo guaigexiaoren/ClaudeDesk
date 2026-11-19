@@ -35,8 +35,8 @@
   --on-accent: #1a120f;
   --accent-ink: var(--accent);
   --border-strong: #3a414d;
-  --shadow-color: var(--shadow-color);
-  --scrim: var(--scrim);
+  --shadow-color: rgba(0, 0, 0, 0.55);
+  --scrim: rgba(8, 6, 5, 0.62);
   --error-text: #fca5a5;
   --scrollbar-thumb: #2f353f;
   --scrollbar-thumb-hover: #3b424e;
@@ -717,7 +717,7 @@ select:hover {
   align-items: center;
   justify-content: center;
   background: var(--accent);
-  color: var(--bg);
+  color: var(--on-accent);
   font-family: var(--font-mono);
   font-size: var(--sidebar-font-size);
   font-weight: 600;
@@ -2784,11 +2784,13 @@ select:hover {
 }
 
 .swatch.active {
-  border-color: var(--text);
+  border-color: transparent;
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
 }
 
 .swatch-edge {
-  box-shadow: inset 0 0 0 1px var(--border);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.65);
 }
 
 /* 回收站 */
@@ -3870,4 +3872,11 @@ select:hover {
 :root[data-theme='light'] .hljs-deletion {
   color: #b31d28;
   background: #ffeef0;
+}
+
+/* 中性强调的 ink 接近正文色，链接需要下划线区分 */
+[data-accent='black'] .markdown a,
+[data-accent='white'] .markdown a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }

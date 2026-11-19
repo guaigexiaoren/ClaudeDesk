@@ -1,7 +1,7 @@
 {
   "name": "claude-desk",
   "productName": "ClaudeDesk",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "ClaudeDesk - 基于 Claude Code 的桌面图形工作台",
   "main": "electron/main.js",
   "author": "YYMY",

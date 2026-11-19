@@ -7,7 +7,7 @@ const { THEMES, THEME_BACKGROUNDS, normalizeTheme } = require('../renderer/theme
 
 test('主题只有黑色和白色', () => {
   assert.deepEqual(THEMES, ['dark', 'light']);
-  assert.equal(THEME_BACKGROUNDS.dark, '#16181d');
+  assert.equal(THEME_BACKGROUNDS.dark, '#14100e');
   assert.equal(THEME_BACKGROUNDS.light, '#f6f3ee');
 });
 

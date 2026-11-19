@@ -21,6 +21,7 @@ const {
 const { Store } = require('./store');
 const { SessionManager } = require('./session');
 const { normalizeTheme, THEME_BACKGROUNDS } = require('../renderer/theme.js');
+const { resolveAccent } = require('../renderer/accent.js');
 const { ProviderStore, buildProviderEnv } = require('./provider-store');
 const {
   appendUsage,
@@ -285,6 +286,7 @@ function showMainWindow() {
 
 function createQuickWindow() {
   const theme = normalizeTheme(store.get().theme);
+  const accent = resolveAccent(store.get().accent, theme);
   quickWindow = new BrowserWindow({
     width: 680,
     height: 154,
@@ -302,7 +304,7 @@ function createQuickWindow() {
     },
   });
   quickWindow.loadFile(path.join(__dirname, '..', 'renderer', 'quick.html'), {
-    query: { theme },
+    query: { theme, accentColor: accent.color, accentBorder: accent.border },
   });
   quickWindow.on('blur', () => {
     if (quickWindow && !quickWindow.isDestroyed()) quickWindow.hide();
@@ -329,7 +331,13 @@ function showQuickWindow() {
   );
   quickWindow.show();
   quickWindow.focus();
-  quickWindow.webContents.send('quick:theme', normalizeTheme(store.get().theme));
+  const theme = normalizeTheme(store.get().theme);
+  const accent = resolveAccent(store.get().accent, theme);
+  quickWindow.webContents.send('quick:theme', {
+    theme,
+    color: accent.color,
+    border: accent.border,
+  });
   quickWindow.webContents.send('quick:focus');
 }
 

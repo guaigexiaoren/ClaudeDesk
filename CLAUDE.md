@@ -17,7 +17,7 @@ ClaudeDesk 是 Claude Code 的桌面图形客户端：Electron 45 + esbuild + `@
 npm install
 npm start                  # 开发运行；prestart 会先执行 build:renderer
 npm run build:renderer     # esbuild 构建 bundle.js / bundle.css / highlight.bundle.js
-npm test                   # node --test，共 106 项单元测试
+npm test                   # node --test，共 110 项单元测试
 node --test tests/format.test.js                                     # 只跑一个测试文件
 node --test --test-name-pattern="关键词" tests/session-groups.test.js  # 只跑匹配的用例
 node tools/e2e-session.js  # 端到端冒烟：真实拉起 Claude（会消耗少量额度）
@@ -47,7 +47,7 @@ npm run dist:mac           # macOS：dmg + zip（必须在 Mac 上执行）
 
 ### 渲染层（`renderer/`，ESM 源码）
 
-- `app.js` 是唯一 UI 源码，由 esbuild 打包成 `bundle.js` / `bundle.css`；`highlight-entry.js` 生成按需加载的懒加载包；`quick.html` + `quick.js` 是快速提问窗口；`session-groups.js`、`format.js`、`ticket-facts.js` 是可直接测试的纯函数模块。
+- `app.js` 是唯一 UI 源码，由 esbuild 打包成 `bundle.js` / `bundle.css`；`highlight-entry.js` 生成按需加载的懒加载包；`quick.html` + `quick.js` 是快速提问窗口；`session-groups.js`、`format.js`、`ticket-facts.js`、`theme.js`、`accent.js` 是可直接测试的纯函数模块。
 - 渲染层默认 `uiMode: 'ticket'`：权限、提问、计划以对话内联审批卡（ticket）呈现，侧栏目录可折叠并显示待审批数量；旧的 `#question-review` 面板和计划 dock 只保留为兼容路径。
 - 关键状态集中在 `app.js` 顶部的 `state`：`activeKey`、`keyToSession/sessionKeys`、`sessionStatus`、`commandsByKey/metaByKey/modeByKey`、`historyCache/historyView`、`pendingEvents`、`switchToken`。
 - 事件流：主进程 `session:event/state/permission/question/plan/error` → preload 订阅 → `handleSessionEvent`。非当前会话只更新状态灯和后台活动计时，不渲染；当前会话才进入 `handleEvent`。

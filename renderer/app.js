@@ -19,6 +19,7 @@ import {
   lastTurnTiming,
 } from './turn-timing.js';
 import { normalizeTheme } from './theme.js';
+import { ACCENT_KEYS, resolveAccent } from './accent.js';
 
 marked.setOptions({ gfm: true, breaks: true });
 
@@ -42,22 +43,6 @@ const TOOL_SUMMARY = {
   WebSearch: (input) => input.query,
   Task: (input) => input.description || input.subagent_type,
   TodoWrite: () => '更新任务列表',
-};
-
-const ACCENTS = {
-  claude: { color: '#d97757', soft: 'rgba(217, 119, 87, 0.14)', border: 'rgba(217, 119, 87, 0.35)' },
-  blue: { color: '#4f8cff', soft: 'rgba(79, 140, 255, 0.14)', border: 'rgba(79, 140, 255, 0.35)' },
-  green: { color: '#3fb950', soft: 'rgba(63, 185, 80, 0.14)', border: 'rgba(63, 185, 80, 0.35)' },
-  purple: { color: '#a371f7', soft: 'rgba(163, 113, 247, 0.14)', border: 'rgba(163, 113, 247, 0.35)' },
-  pink: { color: '#ec6cb9', soft: 'rgba(236, 108, 185, 0.14)', border: 'rgba(236, 108, 185, 0.35)' },
-  amber: { color: '#d29922', soft: 'rgba(210, 153, 34, 0.14)', border: 'rgba(210, 153, 34, 0.35)' },
-  black: {
-    color: '#1f1f1f',
-    soft: 'rgba(31, 31, 31, 0.18)',
-    border: 'rgba(31, 31, 31, 0.45)',
-    on: '#ffffff',
-  },
-  white: { color: '#f2f2f2', soft: 'rgba(242, 242, 242, 0.14)', border: 'rgba(242, 242, 242, 0.4)' },
 };
 
 const DIR_TONES = ['claude', 'blue', 'green', 'purple', 'pink', 'amber'];
@@ -293,6 +278,7 @@ const els = {
   usageModal: $('usage-modal'),
   usageClose: $('usage-close'),
   accentSwatches: $('accent-swatches'),
+  accentName: $('accent-name'),
   themeOptions: $('theme-options'),
   fontSize: $('font-size'),
   fontSizeValue: $('font-size-value'),
@@ -2127,13 +2113,15 @@ async function changePermissionMode(mode) {
 }
 
 function applyAccent(key) {
-  const accent = ACCENTS[key] || ACCENTS.claude;
-  state.accent = ACCENTS[key] ? key : 'claude';
+  const accent = resolveAccent(key, state.theme);
+  state.accent = accent.key;
   const root = document.documentElement.style;
   root.setProperty('--accent', accent.color);
   root.setProperty('--accent-soft', accent.soft);
   root.setProperty('--accent-border', accent.border);
-  root.setProperty('--on-accent', accent.on || '#1a120f');
+  root.setProperty('--accent-ink', accent.ink);
+  root.setProperty('--on-accent', accent.on);
+  document.documentElement.dataset.accent = accent.key;
   renderAccentSwatches();
 }
 
@@ -2141,6 +2129,8 @@ function applyTheme(value) {
   const theme = normalizeTheme(value);
   state.theme = theme;
   document.documentElement.dataset.theme = theme;
+  // 黑/白等中性强调需要按新主题重新解析明暗
+  applyAccent(state.accent);
   renderThemeOptions();
 }
 
@@ -2155,18 +2145,27 @@ function renderThemeOptions() {
 
 function renderAccentSwatches() {
   els.accentSwatches.innerHTML = '';
-  for (const [key, accent] of Object.entries(ACCENTS)) {
+  for (const key of ACCENT_KEYS) {
+    const accent = resolveAccent(key, state.theme);
     const swatch = document.createElement('button');
     swatch.className = `swatch${key === state.accent ? ' active' : ''}`;
-    // 黑色/白色在相近底色上需要一圈描边才看得清
-    if (key === 'black' || key === 'white') swatch.classList.add('swatch-edge');
+    // 中性强调与部分底色接近，加一圈中性描边保证可见
+    if (accent.isNeutral) swatch.classList.add('swatch-edge');
     swatch.style.background = accent.color;
-    swatch.title = key;
+    swatch.title = accent.isNeutral ? `${accent.label}（随主题自适应）` : accent.label;
+    swatch.setAttribute('aria-label', accent.label);
+    swatch.setAttribute('aria-pressed', key === state.accent ? 'true' : 'false');
     swatch.addEventListener('click', () => {
       applyAccent(key);
       window.desk.saveSettings({ accent: state.accent });
     });
     els.accentSwatches.appendChild(swatch);
+  }
+  if (els.accentName) {
+    const current = resolveAccent(state.accent, state.theme);
+    els.accentName.textContent = current.isNeutral
+      ? `${current.label} · 随主题自适应`
+      : current.label;
   }
 }
 
@@ -6166,9 +6165,10 @@ async function init() {
     renderPermissionMode(modeValue);
     if (modeValue !== initialMode) window.desk.saveSettings({ permissionMode: modeValue });
     const initialTheme = normalizeTheme(state.settings.theme);
+    // 先确定强调色（可能是已保存的 black/white），由 applyTheme 统一按主题解析
+    state.accent = resolveAccent(state.settings.accent, initialTheme).key;
     applyTheme(initialTheme);
     if (initialTheme !== state.settings.theme) window.desk.saveSettings({ theme: initialTheme });
-    applyAccent(state.settings.accent || 'claude');
 
     const fontSize = state.settings.fontSize || 14;
     els.fontSize.value = String(fontSize);
