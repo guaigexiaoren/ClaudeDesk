@@ -157,12 +157,14 @@ function resolveAccent(key, theme) {
   const resolvedKey = Object.prototype.hasOwnProperty.call(ACCENTS, key) ? key : 'claude';
   const entry = ACCENTS[resolvedKey];
   const resolvedTheme = normalizeTheme(theme);
+  // 纯黑与暖黑同为深色主题，强调色 token 复用 dark，避免再维护第三套色值
+  const variant = entry[resolvedTheme] ? resolvedTheme : 'dark';
   return {
     key: resolvedKey,
     label: entry.label,
     isNeutral: isNeutralAccent(resolvedKey),
     theme: resolvedTheme,
-    ...entry[resolvedTheme],
+    ...entry[variant],
   };
 }
 

@@ -43,6 +43,33 @@
   color-scheme: dark;
 }
 
+/* 纯黑清爽：中性近黑底、近白字，强调色只做轻微点缀 */
+:root[data-theme='pure'] {
+  color-scheme: dark;
+
+  --bg: color-mix(in srgb, var(--accent) 2%, #0b0b0b);
+  --panel: color-mix(in srgb, var(--accent) 2%, #111111);
+  --panel-2: color-mix(in srgb, var(--accent) 3%, #171717);
+  --panel-3: color-mix(in srgb, var(--accent) 4%, #1f1f1f);
+  --border: color-mix(in srgb, var(--accent) 8%, #2a2a2a);
+  --code-bg: color-mix(in srgb, var(--accent) 2%, #0a0a0a);
+  --text: #f2f2f2;
+  --muted: #a8a8a8;
+  --faint: #7a7a7a;
+  --green: #3fb950;
+  --red: #e5534b;
+  --yellow: #d29922;
+  --desk: color-mix(in srgb, var(--accent) 2%, #0b0b0b);
+  --desk-2: color-mix(in srgb, var(--accent) 3%, #141414);
+  --accent-ink: var(--accent);
+  --border-strong: #3a3a3a;
+  --shadow-color: rgba(0, 0, 0, 0.65);
+  --scrim: rgba(0, 0, 0, 0.72);
+  --error-text: #ff9a9a;
+  --scrollbar-thumb: #2a2a2a;
+  --scrollbar-thumb-hover: #3a3a3a;
+}
+
 :root[data-theme='light'] {
   color-scheme: light;
 
@@ -3879,4 +3906,42 @@ select:hover {
 [data-accent='white'] .markdown a {
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/* 纯黑清爽主题：更宽松的行距与留白，表格只保留横向细线 */
+:root[data-theme='pure'] .msg {
+  line-height: 1.75;
+}
+
+:root[data-theme='pure'] .markdown p {
+  margin: 0.85em 0;
+}
+
+:root[data-theme='pure'] .markdown table {
+  width: 100%;
+  font-size: 1em;
+}
+
+:root[data-theme='pure'] .markdown th,
+:root[data-theme='pure'] .markdown td {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  vertical-align: top;
+}
+
+:root[data-theme='pure'] .markdown th {
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+:root[data-theme='pure'] .markdown td:first-child {
+  min-width: 84px;
+  white-space: nowrap;
+}
+
+:root[data-theme='pure'] .markdown tr:last-child td {
+  border-bottom: none;
 }

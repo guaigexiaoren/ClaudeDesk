@@ -71,6 +71,11 @@ test('黑/白中性强调随主题反转，且同主题下可区分', () => {
   assert.notEqual(darkBlack.color, lightBlack.color);
   assert.notEqual(darkWhite.color, lightWhite.color);
 
+  // 纯黑主题复用深色 token
+  assert.equal(resolveAccent('black', 'pure').color, darkBlack.color);
+  assert.equal(resolveAccent('white', 'pure').color, darkWhite.color);
+  assert.equal(resolveAccent('black', 'pure').theme, 'pure');
+
   // 深色主题下都是亮中性，强调中性比柔和中性更亮
   assert.ok(luminance(darkBlack.color) > luminance(PAGE.dark));
   assert.ok(luminance(darkWhite.color) > luminance(darkBlack.color));

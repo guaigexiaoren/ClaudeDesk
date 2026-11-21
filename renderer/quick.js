@@ -7,7 +7,8 @@ let sending = false;
 
 /** 启动时从 URL 取主题和强调色，之后每次显示由主进程推送最新值。 */
 function applyTheme(value) {
-  document.documentElement.dataset.theme = value === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme =
+    value === 'light' ? 'light' : value === 'pure' ? 'pure' : 'dark';
 }
 
 function applyAccent(color, border) {
